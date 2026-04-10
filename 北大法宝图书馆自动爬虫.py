@@ -108,6 +108,18 @@ class PkulawCrawler:
             profile_ele = self.page.ele('text:个人中心', timeout=1)
             if profile_ele:
                 return True
+            
+            # 检查页面上是否有"登录"按钮 - 如果有，说明未登录
+            try:
+                login_btn = self.page.ele('text:登录', timeout=1)
+                if login_btn:
+                    return False  # 有登录按钮，说明未登录
+            except:
+                pass
+            
+            # 如果既不是电子资源平台首页，也不是登录页面，可能是已登录的其他页面
+            if 'login' not in self.page.url.lower() and '统一认证' not in self.page.title:
+                return True
                 
             return False
         except:
@@ -162,20 +174,35 @@ class PkulawCrawler:
             time.sleep(3)
             print_info(f"当前页面: {self.page.title}")
             
-            # 检查是否已登录
+            # 检查是否已登录（看是否有退出按钮等）
             if self.check_login_status():
-                print_success("检测到已登录状态，跳过登录")
+                print_success("检测到已登录状态（有退出/个人中心等），跳过登录")
                 return True
             
             # 处理可能的弹窗
             self.handle_popup()
             
-            # 再次检查登录状态
+            # 再次检查
             if self.check_login_status():
-                print_success("已登录")
+                print_success("已登录，跳过")
                 return True
             
-            # 点击右上角的"登录"按钮（不是校外访问）
+            # 检查页面上是否有登录按钮
+            print_info("检查页面状态...")
+            has_login_btn = False
+            try:
+                login_check = self.page.ele('text:登录', timeout=2)
+                if login_check:
+                    has_login_btn = True
+            except:
+                pass
+            
+            # 如果页面上没有登录按钮，可能已经登录
+            if not has_login_btn:
+                print_success("页面上没有登录按钮，判断为已登录状态")
+                return True
+            
+            # 点击右上角的"登录"按钮
             print_info("查找登录按钮...")
             
             login_btn = None
@@ -217,6 +244,9 @@ class PkulawCrawler:
                 print_warning("未找到登录按钮，尝试直接访问登录URL...")
                 login_url = "https://eds.tju.edu.cn/ermsClient/viewLogin.do"
             
+            # 记录点击前页面
+            page_before_click = self.page.title
+            
             # 点击登录按钮或访问登录URL
             if login_btn:
                 print_info("点击登录按钮...")
@@ -246,7 +276,13 @@ class PkulawCrawler:
                 return False
             
             time.sleep(5)  # Vue单页应用跳转需要更长时间
-            print_info(f"当前页面: {self.page.title}")
+            page_after_click = self.page.title
+            print_info(f"点击后页面: {page_after_click}")
+            
+            # 如果页面没有变化（还是电子资源平台），说明已经是登录状态
+            if page_before_click == page_after_click and '电子资源' in page_after_click:
+                print_success("页面未变化，已是登录状态，跳过登录流程")
+                return True
             
             # 检查是否跳转到统一认证页面
             if '统一认证' in self.page.title or '认证' in self.page.title:
@@ -674,9 +710,25 @@ class PkulawCrawler:
             page_title = self.pkulaw_page.title
             print_info(f"当前页面: {page_title} - {page_url}")
             
-            if 'pkulaw' in page_url:
+            # 成功标志：包含 pkulaw / chinalawinfo / 图书馆代理域名特征
+            if 'pkulaw' in page_url or 'chinalawinfo' in page_url or '.eds.tju.edu.cn' in page_url:
                 print_success(f"已进入北大法宝: {page_title}")
                 return True
+            
+            # 如果是 entry.do 链接（图书馆资源跳转网关），等待跳转
+            if 'entry.do' in page_url:
+                print_info("检测到资源跳转网关，等待跳转完成...")
+                time.sleep(8)
+                
+                # 刷新当前页面URL
+                page_url = self.pkulaw_page.url.lower()
+                page_title = self.pkulaw_page.title
+                print_info(f"跳转后页面: {page_title} - {page_url}")
+                
+                # 再次检测
+                if 'pkulaw' in page_url or 'chinalawinfo' in page_url or '.eds.tju.edu.cn' in page_url:
+                    print_success(f"已进入北大法宝: {page_title}")
+                    return True
             
             # 如果进入了资源详情页（eresourceInfo），需要再点击访问入口
             if 'eresourceinfo' in page_url or 'rid=' in page_url:
@@ -768,51 +820,64 @@ class PkulawCrawler:
                         pass
                 
                 if access_link:
-                    link_text = access_link.text or access_link.attr('href') or '访问入口'
+                    link_text = access_link.text or ''
+                    link_href = access_link.attr('href') or ''
                     print_info(f"点击: {link_text[:50]}")
+                    print_info(f"链接: {link_href}")
                     
-                    # 记录点击前标签页数量
-                    tabs_before = len(self.browser.get_tabs())
-                    
-                    try:
-                        access_link.click()
-                    except:
-                        try:
-                            access_link.run_js('this.click()')
-                        except Exception as e:
-                            print_error(f"点击失败: {e}")
-                            return False
-                    
-                    print_info("等待跳转...")
-                    time.sleep(10)
-                    
-                    # 检查是否有新标签页
-                    tabs_after = len(self.browser.get_tabs())
-                    if tabs_after > tabs_before:
-                        print_info(f"检测到新标签页，共 {tabs_after} 个标签页")
-                        # 找包含pkulaw的标签页
-                        for tab in self.browser.get_tabs():
-                            if 'pkulaw' in tab.url.lower() or 'chinalawinfo' in tab.url.lower():
-                                self.pkulaw_page = tab
-                                print_success(f"已进入北大法宝: {tab.title}")
-                                return True
-                    
-                    # 检查当前页是否已经是北大法宝
-                    if 'pkulaw' in self.pkulaw_page.url.lower() or 'chinalawinfo' in self.pkulaw_page.url.lower():
-                        print_success(f"已进入北大法宝: {self.pkulaw_page.title}")
-                        return True
-                    
-                    # 如果还在详情页，尝试获取href直接访问
-                    href = access_link.attr('href')
-                    if href:
-                        print_info(f"尝试直接访问: {href}")
-                        if href.startswith('http'):
-                            self.pkulaw_page.get(href)
+                    # 如果是entry.do链接，直接访问更可靠
+                    if 'entry.do' in link_href:
+                        print_info("检测到entry.do跳转链接，直接访问...")
+                        if link_href.startswith('http'):
+                            self.pkulaw_page.get(link_href)
                         else:
-                            self.pkulaw_page.get(f"https://eds.tju.edu.cn{href}")
+                            self.pkulaw_page.get(f"https://eds.tju.edu.cn{link_href}")
+                        
+                        print_info("等待跳转完成...")
                         time.sleep(8)
                         
-                        if 'pkulaw' in self.pkulaw_page.url.lower():
+                        # 检查是否成功进入北大法宝
+                        current_url = self.pkulaw_page.url.lower()
+                        print_info(f"当前URL: {current_url}")
+                        
+                        if 'pkulaw' in current_url or 'chinalawinfo' in current_url:
+                            print_success(f"已进入北大法宝: {self.pkulaw_page.title}")
+                            return True
+                        
+                        # 如果还在entry.do，等待一下再检查
+                        if 'entry.do' in current_url:
+                            print_info("仍在跳转中，继续等待...")
+                            time.sleep(5)
+                            current_url = self.pkulaw_page.url.lower()
+                            if 'pkulaw' in current_url or 'chinalawinfo' in current_url:
+                                print_success(f"已进入北大法宝: {self.pkulaw_page.title}")
+                                return True
+                    else:
+                        # 普通点击方式
+                        try:
+                            access_link.click()
+                        except:
+                            try:
+                                access_link.run_js('this.click()')
+                            except Exception as e:
+                                print_error(f"点击失败: {e}")
+                                return False
+                        
+                        print_info("等待跳转...")
+                        time.sleep(10)
+                        
+                        # 检查是否有新标签页
+                        tabs_after = len(self.browser.get_tabs())
+                        if tabs_after > len(all_links):
+                            print_info(f"检测到新标签页")
+                            for tab in self.browser.get_tabs():
+                                if 'pkulaw' in tab.url.lower() or 'chinalawinfo' in tab.url.lower():
+                                    self.pkulaw_page = tab
+                                    print_success(f"已进入北大法宝: {tab.title}")
+                                    return True
+                        
+                        # 检查当前页
+                        if 'pkulaw' in self.pkulaw_page.url.lower() or 'chinalawinfo' in self.pkulaw_page.url.lower():
                             print_success(f"已进入北大法宝: {self.pkulaw_page.title}")
                             return True
                 
