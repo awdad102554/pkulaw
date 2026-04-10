@@ -959,43 +959,72 @@ class PkulawCrawler:
             
             print_info(f"搜索关键词: {keyword}")
             
+            # 打印页面所有input供调试
+            print_info("查找搜索框...")
+            try:
+                inputs = page.eles('tag:input')
+                print_info(f"页面共有 {len(inputs)} 个input")
+                for i, inp in enumerate(inputs[:10]):
+                    inp_id = inp.attr('id') or '无id'
+                    inp_name = inp.attr('name') or '无name'
+                    inp_placeholder = inp.attr('placeholder') or '无placeholder'
+                    inp_type = inp.attr('type') or 'text'
+                    print(f"  [{i}] id={inp_id}, name={inp_name}, placeholder={inp_placeholder}, type={inp_type}")
+            except Exception as e:
+                print_info(f"获取input列表失败: {e}")
+            
             # 查找搜索框
             search_input = None
-            for selector in ['tag:input@id=keyword', 'tag:input@name=keyword', 
-                           'tag:input@placeholder*=搜索', 'tag:input@placeholder*=标题']:
+            selectors = [
+                'tag:input@id=keyword',
+                'tag:input@name=keyword', 
+                'tag:input@name=kw',
+                'tag:input@placeholder*=搜索',
+                'tag:input@placeholder*=标题',
+                'tag:input@placeholder*=关键词',
+                'css:.search-input input',
+                'css:.search-box input',
+                'css:input[type=text]',
+            ]
+            
+            for selector in selectors:
                 try:
-                    search_input = page.ele(selector, timeout=2)
+                    search_input = page.ele(selector, timeout=1)
                     if search_input:
                         print_info(f"找到搜索框: {selector}")
                         break
                 except:
                     continue
             
+            # 如果还是没找到，尝试第一个可见的text输入框
+            if not search_input:
+                print_info("尝试查找第一个文本输入框...")
+                try:
+                    inputs = page.eles('tag:input')
+                    for inp in inputs:
+                        inp_type = inp.attr('type') or 'text'
+                        if inp_type == 'text':
+                            search_input = inp
+                            print_info("使用第一个文本输入框作为搜索框")
+                            break
+                except:
+                    pass
+            
             if search_input:
+                # 清除并输入关键词
                 search_input.clear()
+                time.sleep(0.5)
                 search_input.input(keyword)
                 print_info(f"已输入关键词: {keyword}")
                 time.sleep(1)
                 
-                # 点击搜索或回车
-                search_clicked = False
-                try:
-                    search_btn = page.ele('tag:button@type=submit', timeout=2)
-                    search_btn.click()
-                    search_clicked = True
-                    print_info("点击搜索按钮")
-                except:
-                    try:
-                        search_btn = page.ele('text:检索', timeout=2)
-                        search_btn.click()
-                        search_clicked = True
-                        print_info("点击检索按钮")
-                    except:
-                        pass
+                # 执行搜索 - 使用回车
+                print_info("执行搜索...")
+                search_input.input('\n')
+                print_info("已按回车搜索")
                 
-                if not search_clicked:
-                    search_input.input('\n')
-                    print_info("按回车搜索")
+                time.sleep(5)
+                print_info(f"搜索后页面: {page.title}")
                 
                 time.sleep(5)
                 print_info(f"搜索完成: {page.title}")
