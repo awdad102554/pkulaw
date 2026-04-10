@@ -1047,74 +1047,254 @@ class PkulawCrawler:
             existing = self.read_urls()
             total_new = 0
             
-            for page_num in range(1, max_pages + 1):
-                print_info(f"处理第 {page_num} 页...")
-                
-                # 获取列表
-                target = None
-                for selector in ['tag:tbody', '.result-list', '.list-content']:
-                    try:
-                        target = page.ele(selector, timeout=2)
-                        if target:
-                            break
-                    except:
-                        continue
-                
-                if not target:
-                    print_info("未找到列表，可能已到最后一页")
-                    break
-                
-                # 获取行
-                items = target.eles('tag:tr') or target.eles('.list-item') or target.eles('tag:li')
+            # 等待列表加载
+            print_info("等待搜索结果列表加载...")
+            time.sleep(3)
+            
+            # 点击"不分组"后，处理所有结果并分页爬取
+            print_info("收集第一页数据，展开各分组...")
+            
+            # 第一步：点击"不分组"选项，取消分组显示
+            print_info("点击'不分组'选项...")
+            try:
+                no_group_btn = page.ele('text:不分组', timeout=3)
+                no_group_btn.click()
+                print_info("已点击'不分组'，等待页面刷新...")
+                time.sleep(3)
+            except:
+                try:
+                    page.run_js('document.evaluate("//text()[contains(.,\'不分组\')]", document).iterateNext().click()')
+                    print_info("已点击'不分组'，等待页面刷新...")
+                    time.sleep(3)
+                except Exception as e:
+                    print_info(f"点击'不分组'失败: {e}")
+            
+            print_info("开始收集链接...")
+            
+            # 获取列表 - 尝试多种选择器
+            target = None
+            list_selectors = [
+                '.result-list',      # 结果列表
+                '.list-content',     # 列表内容
+                'tag:tbody',         # 表格体
+                '.search-result',    # 搜索结果
+                '.data-list',        # 数据列表
+                '#resultList',       # 结果列表ID
+                '.item-list',        # 项目列表
+            ]
+            
+            for selector in list_selectors:
+                try:
+                    target = page.ele(selector, timeout=1)
+                    if target:
+                        print_info(f"找到列表: {selector}")
+                        break
+                except:
+                    continue
+            
+            items = []
+            
+            if not target:
+                # 尝试找任何包含链接的列表区域
+                print_info("尝试查找列表区域...")
+                try:
+                    # 找包含多个链接的区域
+                    all_links = page.eles('tag:a')
+                    print_info(f"页面共有 {len(all_links)} 个链接")
+                    
+                    # 打印前几个链接供调试
+                    for i, link in enumerate(all_links[:10]):
+                        href = link.attr('href') or ''
+                        text = link.text or ''
+                        if text.strip() and len(text) > 5:
+                            print(f"  样例链接[{i}]: {text[:40]} -> {href[:60]}")
+                            if i >= 5:
+                                break
+                    
+                    # 如果没有找到列表容器，直接遍历所有链接
+                    if len(all_links) > 5:
+                        for link in all_links:
+                            href = link.attr('href') or ''
+                            text = link.text or ''
+                            # 过滤出法律法规或案例链接（同时检查href和文本）
+                            if ('law' in href or 'case' in href or 'detail' in href or 
+                                'chl' in href or 'article' in href or
+                                '法规' in text or '法律' in text or '规划' in text):
+                                if len(text) > 5:  # 有实际标题
+                                    items.append(link)
+                        if items:
+                            print_info(f"找到 {len(items)} 个可能的结果链接")
+                except Exception as e:
+                    print_info(f"查找链接出错: {e}")
                 
                 if not items:
-                    print_info("本页无数据")
-                    break
-                
-                page_new = 0
-                for i, item in enumerate(items):
-                    try:
-                        link = item.ele('tag:a')
-                        if link:
-                            url = link.attr('href')
-                            title = link.text or ''
+                    print_info("未找到列表，可能无搜索结果")
+                    return 0
+            else:
+                # 获取列表项
+                try:
+                    items = target.eles('tag:tr') or target.eles('.list-item') or target.eles('.item') or target.eles('tag:li')
+                    print_info(f"从列表中找到 {len(items)} 个条目")
+                except Exception as e:
+                    print_info(f"获取列表项出错: {e}")
+            
+            if not items:
+                print_info("本页无数据")
+                return 0
+            
+            print_info(f"找到 {len(items)} 个条目")
+            
+            print_info(f"开始处理 {len(items)} 个条目...")
+            page_new = 0
+            for i, item in enumerate(items):
+                try:
+                    # 显示进度
+                    if i % 10 == 0:
+                        print(f"\r  处理中... {i}/{len(items)}", end='', flush=True)
+                    
+                    # 如果是元素对象，查找链接
+                    if hasattr(item, 'ele'):
+                        try:
+                            link = item.ele('tag:a', timeout=1)
+                        except:
+                            continue
+                    else:
+                        # 已经是链接元素
+                        link = item
+                    
+                    if link:
+                        url = link.attr('href')
+                        title = link.text or ''
+                        
+                        if url and title:
+                            # 补全URL
+                            if url.startswith('/'):
+                                url = 'https://www.pkulaw.com' + url
+                            elif not url.startswith('http'):
+                                url = 'https://www.pkulaw.com/' + url
                             
-                            if url:
-                                if url.startswith('/'):
-                                    url = 'https://www.pkulaw.com' + url
-                                elif not url.startswith('http'):
-                                    url = 'https://www.pkulaw.com/' + url
-                                
+                            # 过滤非详情页链接（放宽条件）
+                            # 北大法宝详情页链接通常包含 law/case/detail/article/chl 或者是具体的文档ID
+                            url_lower = url.lower()
+                            is_valid = ('/law' in url_lower or '/case' in url or 'detail' in url_lower or 
+                                       '/article' in url_lower or '/chl' in url_lower or 
+                                       '/pfnl' in url_lower or  # 司法案例
+                                       'docid' in url_lower or  # 文档ID
+                                       len(url) > 50)  # 较长的URL通常是详情页
+                            
+                            if is_valid:
                                 if url not in existing:
                                     existing.add(url)
                                     self.append_url(url)
                                     page_new += 1
                                     total_new += 1
-                        
-                        print_progress(i + 1, len(items), title[:20])
-                    except:
-                        continue
+                                    if page_new <= 5:  # 打印前5个收集的URL
+                                        print(f"  [收集] {title[:30]}... -> {url[:60]}")
+                                    
+                                    # 每收集10个打印一次
+                                    if page_new % 10 == 0:
+                                        print(f"\r  已收集 {page_new} 个URL", end='', flush=True)
+                except Exception as e:
+                    continue
+            
+            print()  # 换行
+            print_success(f"第1页新增 {page_new} 个URL")
+            
+            # 翻页收集
+            for page_num in range(2, max_pages + 1):
+                print_info(f"处理第 {page_num} 页...")
                 
-                print_success(f"第{page_num}页新增 {page_new} 个URL")
-                
-                # 翻页
-                if page_num < max_pages:
-                    try:
-                        next_btn = page.ele('text:下一页', timeout=2)
-                        if next_btn and 'disabled' not in (next_btn.attr('class') or ''):
+                try:
+                    # 查找下一页按钮
+                    next_btn = None
+                    for selector in ['text:下一页', '.next', '.pagination-next', '[title*=下一页]', '[class*=next]']:
+                        try:
+                            next_btn = page.ele(selector, timeout=2)
+                            if next_btn:
+                                # 检查是否禁用
+                                btn_class = next_btn.attr('class') or ''
+                                if 'disabled' not in btn_class and '禁' not in btn_class:
+                                    print_info(f"找到下一页按钮: {selector}")
+                                    break
+                                else:
+                                    next_btn = None  # 禁用状态，继续找
+                        except:
+                            continue
+                    
+                    if next_btn:
+                        print_info("点击下一页...")
+                        try:
                             next_btn.click()
-                            time.sleep(3)
-                        else:
-                            print_info("无下一页")
-                            break
-                    except:
+                        except:
+                            print_info("直接点击失败，使用JS点击...")
+                            next_btn.run_js('this.click()')
+                        time.sleep(3)
+                        
+                        # 收集当前页
+                        items = []
+                        try:
+                            all_links = page.eles('tag:a')
+                            print_info(f"第{page_num}页共有 {len(all_links)} 个链接")
+                            
+                            # 打印前几个链接供调试
+                            for i, link in enumerate(all_links[:5]):
+                                href = link.attr('href') or ''
+                                text = link.text or ''
+                                print(f"  样例链接[{i}]: {text[:30]} -> {href[:60]}")
+                            
+                            for link in all_links:
+                                href = link.attr('href') or ''
+                                if 'law' in href or 'case' in href or 'detail' in href or 'article' in href or 'chl' in href:
+                                    items.append(link)
+                            print_info(f"过滤后找到 {len(items)} 个可能的结果链接")
+                        except Exception as e:
+                            print_info(f"收集链接出错: {e}")
+                        
+                        page_new = 0
+                        for item in items:
+                            try:
+                                if hasattr(item, 'attr'):
+                                    url = item.attr('href')
+                                    title = item.text or ''
+                                    
+                                    if url and title:
+                                        if url.startswith('/'):
+                                            url = 'https://www.pkulaw.com' + url
+                                        elif not url.startswith('http'):
+                                            url = 'https://www.pkulaw.com/' + url
+                                        
+                                        # 放宽过滤条件
+                                        url_lower = url.lower()
+                                        is_valid = ('/law' in url_lower or '/case' in url or 'detail' in url_lower or 
+                                                   '/article' in url_lower or '/chl' in url_lower or 
+                                                   '/pfnl' in url_lower or 'docid' in url_lower or len(url) > 50)
+                                        
+                                        if is_valid:
+                                            if url not in existing:
+                                                existing.add(url)
+                                                self.append_url(url)
+                                                page_new += 1
+                                                total_new += 1
+                            except:
+                                continue
+                        
+                        print_success(f"第{page_num}页新增 {page_new} 个URL")
+                    else:
+                        print_info("无下一页按钮，结束收集")
                         break
+                        
+                except Exception as e:
+                    print_info(f"翻页出错: {e}")
+                    break
             
             print_success(f"共收集 {total_new} 个URL")
+            print_info(f"URL已保存到: {self.urls_file}")
             return total_new
             
         except Exception as e:
             print_error(f"收集出错: {e}")
+            import traceback
+            traceback.print_exc()
             return 0
     
     def download_cases(self):
