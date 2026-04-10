@@ -901,12 +901,45 @@ class PkulawCrawler:
             print_error(f"跳转出错: {e}")
             return False
     
-    def search_cases(self, keyword=''):
-        """搜索案件"""
-        print_step(3, "搜索案件")
+    def select_database(self, db_type='法律法规'):
+        """选择数据库类型：法律法规 或 司法案例"""
+        print_info(f"选择数据库: {db_type}")
         
         try:
             page = self.pkulaw_page
+            
+            # 北大法宝数据库类型对应的URL路径
+            db_urls = {
+                '法律法规': 'https://www.pkulaw.com/chl',
+                '司法案例': 'https://www.pkulaw.com/pfnl',
+                '法学期刊': 'https://www.pkulaw.com/journal',
+            }
+            
+            if db_type in db_urls:
+                target_url = db_urls[db_type]
+                print_info(f"访问 {db_type} 数据库: {target_url}")
+                page.get(target_url)
+                time.sleep(5)
+                print_info(f"当前页面: {page.title}")
+                return True
+            else:
+                print_warning(f"未知的数据库类型: {db_type}，使用默认页面")
+                return True
+                
+        except Exception as e:
+            print_error(f"选择数据库出错: {e}")
+            return False
+    
+    def search_cases(self, keyword='', db_type='法律法规'):
+        """搜索案件"""
+        print_step(3, f"搜索案件 - {db_type}")
+        
+        try:
+            page = self.pkulaw_page
+            
+            # 先选择数据库类型
+            if not self.select_database(db_type):
+                return False
             
             if not keyword:
                 print_info("无搜索关键词，使用当前页面")
@@ -917,10 +950,11 @@ class PkulawCrawler:
             # 查找搜索框
             search_input = None
             for selector in ['tag:input@id=keyword', 'tag:input@name=keyword', 
-                           'tag:input@placeholder*=搜索']:
+                           'tag:input@placeholder*=搜索', 'tag:input@placeholder*=标题']:
                 try:
                     search_input = page.ele(selector, timeout=2)
                     if search_input:
+                        print_info(f"找到搜索框: {selector}")
                         break
                 except:
                     continue
@@ -928,19 +962,34 @@ class PkulawCrawler:
             if search_input:
                 search_input.clear()
                 search_input.input(keyword)
+                print_info(f"已输入关键词: {keyword}")
                 time.sleep(1)
                 
                 # 点击搜索或回车
+                search_clicked = False
                 try:
                     search_btn = page.ele('tag:button@type=submit', timeout=2)
                     search_btn.click()
+                    search_clicked = True
+                    print_info("点击搜索按钮")
                 except:
+                    try:
+                        search_btn = page.ele('text:检索', timeout=2)
+                        search_btn.click()
+                        search_clicked = True
+                        print_info("点击检索按钮")
+                    except:
+                        pass
+                
+                if not search_clicked:
                     search_input.input('\n')
+                    print_info("按回车搜索")
                 
                 time.sleep(5)
                 print_info(f"搜索完成: {page.title}")
+                print_info(f"当前URL: {page.url}")
             else:
-                print_info("未找到搜索框，使用当前页面")
+                print_warning("未找到搜索框，使用当前页面")
             
             return True
             
@@ -1123,7 +1172,7 @@ class PkulawCrawler:
         except:
             pass
     
-    def run(self, keyword='', max_pages=5):
+    def run(self, keyword='', max_pages=5, db_type='法律法规'):
         """运行完整流程"""
         print_header("北大法宝图书馆自动爬虫启动")
         
@@ -1147,8 +1196,8 @@ class PkulawCrawler:
         
         self.wait()
         
-        # 4. 搜索
-        self.search_cases(keyword)
+        # 4. 选择数据库并搜索
+        self.search_cases(keyword, db_type)
         time.sleep(2)
         
         # 5. 收集URL
@@ -1163,6 +1212,8 @@ class PkulawCrawler:
         elapsed = time.time() - start
         print_header("运行统计")
         print_info(f"运行时间: {elapsed:.1f} 秒")
+        print_info(f"数据库类型: {db_type}")
+        print_info(f"搜索关键词: {keyword if keyword else '无'}")
         print_info(f"收集URL: {collected} 个")
         print_info(f"下载成功: {downloaded} 个")
         print_info(f"下载目录: {self.folder_path}")
@@ -1179,19 +1230,31 @@ def main():
     print()
     
     # 输入参数
+    print("数据库类型:")
+    print("  1. 法律法规 (默认)")
+    print("  2. 司法案例")
+    db_choice = input("请选择数据库类型 (1/2，默认1): ").strip()
+    db_type = '司法案例' if db_choice == '2' else '法律法规'
+    
     keyword = input("搜索关键词（直接回车表示不搜索）: ").strip()
     max_pages = input("最大翻页数（默认5）: ").strip()
     max_pages = int(max_pages) if max_pages.isdigit() else 5
     
     print()
-    confirm = input("确认开始？(Y/n): ").strip().lower()
+    print("=" * 50)
+    print(f"数据库类型: {db_type}")
+    print(f"搜索关键词: {keyword if keyword else '无'}")
+    print(f"最大翻页数: {max_pages}")
+    print("=" * 50)
+    
+    confirm = input("\n确认开始？(Y/n): ").strip().lower()
     if confirm and confirm not in ['y', 'yes', '是']:
         print("已取消")
         return
     
     # 运行
     crawler = PkulawCrawler()
-    crawler.run(keyword=keyword, max_pages=max_pages)
+    crawler.run(keyword=keyword, max_pages=max_pages, db_type=db_type)
     
     print()
     input("按回车键退出...")
