@@ -840,7 +840,8 @@ class PkulawCrawler:
                         current_url = self.pkulaw_page.url.lower()
                         print_info(f"当前URL: {current_url}")
                         
-                        if 'pkulaw' in current_url or 'chinalawinfo' in current_url:
+                        # 成功标志：pkulaw / chinalawinfo / 图书馆代理域名
+                        if 'pkulaw' in current_url or 'chinalawinfo' in current_url or '.eds.tju.edu.cn' in current_url:
                             print_success(f"已进入北大法宝: {self.pkulaw_page.title}")
                             return True
                         
@@ -849,7 +850,7 @@ class PkulawCrawler:
                             print_info("仍在跳转中，继续等待...")
                             time.sleep(5)
                             current_url = self.pkulaw_page.url.lower()
-                            if 'pkulaw' in current_url or 'chinalawinfo' in current_url:
+                            if 'pkulaw' in current_url or 'chinalawinfo' in current_url or '.eds.tju.edu.cn' in current_url:
                                 print_success(f"已进入北大法宝: {self.pkulaw_page.title}")
                                 return True
                     else:
