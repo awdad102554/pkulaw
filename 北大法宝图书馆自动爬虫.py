@@ -907,23 +907,35 @@ class PkulawCrawler:
         
         try:
             page = self.pkulaw_page
+            current_url = page.url
+            print_info(f"当前URL: {current_url}")
             
-            # 北大法宝数据库类型对应的URL路径
-            db_urls = {
-                '法律法规': 'https://www.pkulaw.com/chl',
-                '司法案例': 'https://www.pkulaw.com/pfnl',
-                '法学期刊': 'https://www.pkulaw.com/journal',
+            # 从当前URL中提取基础代理地址
+            # 例如：https://cffgh3f953b9fbf834730swbfxonkxoxbk6w0kfxig.eds.tju.edu.cn/law?way=topGuid
+            import re
+            match = re.match(r'(https?://[^/]+)', current_url)
+            if not match:
+                print_error("无法解析当前URL")
+                return False
+            
+            base_url = match.group(1)  # https://xxx.eds.tju.edu.cn
+            
+            # 数据库类型对应的路径
+            db_paths = {
+                '法律法规': '/law?way=topGuid',
+                '司法案例': '/case?way=topGuid',
             }
             
-            if db_type in db_urls:
-                target_url = db_urls[db_type]
+            if db_type in db_paths:
+                target_url = base_url + db_paths[db_type]
                 print_info(f"访问 {db_type} 数据库: {target_url}")
                 page.get(target_url)
                 time.sleep(5)
                 print_info(f"当前页面: {page.title}")
+                print_info(f"当前URL: {page.url}")
                 return True
             else:
-                print_warning(f"未知的数据库类型: {db_type}，使用默认页面")
+                print_warning(f"未知的数据库类型: {db_type}，使用当前页面")
                 return True
                 
         except Exception as e:
