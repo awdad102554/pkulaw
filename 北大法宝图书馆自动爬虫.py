@@ -14,6 +14,9 @@ import random
 import os
 import sys
 import re
+import zipfile
+import urllib.request
+import urllib.parse
 
 # ============== 配置 ==============
 LIBRARY_URL = 'https://eds.tju.edu.cn/ermsClient/browse.do'
@@ -85,6 +88,79 @@ class PkulawCrawler:
         print_info(f"等待 {sec} 秒...")
         time.sleep(sec)
     
+    def handle_login_popup(self):
+        """处理登录弹窗"""
+        try:
+            # 检查"账户已在其他地方登录"弹窗
+            popup_text = self.page.ele('text:您的账户已经在其他地方登录', timeout=2)
+            if popup_text:
+                print_info("检测到'账户已在其他地方登录'弹窗")
+                time.sleep(1)
+                
+                # 在弹窗内找按钮 - 先找到弹窗容器
+                dialog = None
+                try:
+                    dialog = self.page.ele('.el-dialog, .el-message-box', timeout=2)
+                except:
+                    pass
+                
+                # 找"登录"按钮（优先在弹窗内查找）
+                continue_btn = None
+                
+                # 方法1: 在弹窗内查找
+                if dialog:
+                    try:
+                        continue_btn = dialog.ele('text:登录', timeout=2)
+                        print_info("在弹窗内找到登录按钮")
+                    except:
+                        pass
+                
+                # 方法2: 使用XPath精确定位弹窗按钮
+                if not continue_btn:
+                    try:
+                        # 查找包含"其他地方登录"文本的弹窗内的登录按钮
+                        continue_btn = self.page.ele('xpath://div[contains(text(),"其他地方登录") or contains(@class,"el-dialog")]//button//span[contains(text(),"登录")]/parent::button', timeout=2)
+                        if not continue_btn:
+                            continue_btn = self.page.ele('xpath://div[contains(@class,"el-dialog") or contains(@class,"el-message-box")]//button[contains(.//span,"登录")]', timeout=2)
+                        if continue_btn:
+                            print_info("使用XPath找到登录按钮")
+                    except:
+                        pass
+                
+                # 方法3: 查找所有登录按钮，取最后一个（通常弹窗的在后面）
+                if not continue_btn:
+                    try:
+                        buttons = self.page.eles('text:登录')
+                        if buttons and len(buttons) > 1:
+                            continue_btn = buttons[-1]  # 取最后一个
+                            print_info(f"使用最后一个登录按钮，共{len(buttons)}个")
+                    except:
+                        pass
+                
+                if not continue_btn:
+                    print_error("未找到登录按钮")
+                    return False
+                
+                # 点击按钮（先尝试正常点击，失败则用JS）
+                try:
+                    continue_btn.click()
+                    print_info("已点击继续登录")
+                except Exception as e:
+                    print_info(f"点击失败，使用JS点击: {e}")
+                    try:
+                        continue_btn.run_js('this.click()')
+                        print_info("已使用JS点击继续登录")
+                    except Exception as e2:
+                        print_error(f"JS点击也失败: {e2}")
+                        return False
+                
+                time.sleep(3)
+                return True
+            return False
+        except Exception as e:
+            print_info(f"处理登录弹窗出错: {e}")
+            return False
+    
     def login_library(self):
         """登录图书馆"""
         print_step(1, "登录图书馆")
@@ -100,6 +176,18 @@ class PkulawCrawler:
                 logout_btn = self.page.ele('text:退出', timeout=2)
                 if logout_btn:
                     print_success("检测到已登录状态，跳过登录")
+                    return True
+            except:
+                pass
+            
+            # 处理可能的弹窗
+            self.handle_login_popup()
+            
+            # 再次检查是否已登录
+            try:
+                logout_btn = self.page.ele('text:退出', timeout=2)
+                if logout_btn:
+                    print_success("已登录")
                     return True
             except:
                 pass
@@ -180,8 +268,30 @@ class PkulawCrawler:
             time.sleep(5)
             print_info(f"等待后页面: {self.page.title}")
             
+            # 处理可能的弹窗
+            self.handle_login_popup()
+            
+            # 再次检查登录状态
+            try:
+                logout_btn = self.page.ele('text:退出', timeout=2)
+                if logout_btn:
+                    print_success("登录成功！检测到退出按钮")
+                    return True
+            except:
+                pass
+            
+            # 检查是否还在登录页面
             if 'login' in self.page.url.lower() or '统一认证' in self.page.title:
-                print_error("登录失败")
+                # 检查是否有错误提示
+                try:
+                    error_msg = self.page.ele('.error-msg', timeout=2)
+                    if error_msg:
+                        print_error(f"登录失败: {error_msg.text}")
+                        return False
+                except:
+                    pass
+                
+                print_error("登录失败，仍在登录页面")
                 return False
             
             print_success(f"登录成功！当前页面: {self.page.title}")
@@ -394,19 +504,17 @@ class PkulawCrawler:
         print_info("点击'不分组'选项...")
         try:
             no_group_btn = self.pkulaw_page.ele('text:不分组', timeout=3)
-            no_group_btn.click()
+            try:
+                no_group_btn.click()
+            except:
+                print_info("直接点击失败，使用JS点击...")
+                no_group_btn.run_js('this.click()')
             print_info("已点击'不分组'，等待页面刷新...")
             time.sleep(3)
             return True
-        except:
-            try:
-                self.pkulaw_page.run_js('document.evaluate("//text()[contains(.,\'不分组\')]", document).iterateNext().click()')
-                print_info("已点击'不分组'，等待页面刷新...")
-                time.sleep(3)
-                return True
-            except Exception as e:
-                print_info(f"点击'不分组'失败: {e}")
-                return False
+        except Exception as e:
+            print_info(f"点击'不分组'失败: {e}")
+            return False
     
     def get_total_pages(self):
         """获取总页数"""
@@ -450,6 +558,42 @@ class PkulawCrawler:
             print_error(f"获取总页数出错: {e}")
             return 100
     
+    def download_and_extract_zip(self, zip_url, page_num):
+        """下载zip并解压"""
+        try:
+            # 下载zip文件
+            zip_filename = os.path.join(self.folder_path, f'page_{page_num}.zip')
+            print_info(f"下载ZIP文件: {zip_url[:80]}...")
+            
+            # 设置请求头模拟浏览器
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0'
+            }
+            req = urllib.request.Request(zip_url, headers=headers)
+            
+            with urllib.request.urlopen(req, timeout=60) as response:
+                with open(zip_filename, 'wb') as f:
+                    f.write(response.read())
+            
+            print_info(f"ZIP文件已下载: {zip_filename}")
+            
+            # 解压zip文件
+            print_info("解压ZIP文件...")
+            with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
+                zip_ref.extractall(self.folder_path)
+            
+            print_info(f"已解压到: {self.folder_path}")
+            
+            # 删除zip文件
+            os.remove(zip_filename)
+            print_info(f"已删除ZIP文件")
+            
+            return True
+            
+        except Exception as e:
+            print_error(f"下载或解压ZIP失败: {e}")
+            return False
+    
     def download_page(self, page_num):
         """下载当前页的所有数据"""
         try:
@@ -459,10 +603,57 @@ class PkulawCrawler:
             # 1. 点击"全选"
             print_info("点击'全选'...")
             try:
+                # 等待页面加载完成（检查列表是否存在）
+                time.sleep(3)
+                try:
+                    page.ele('.result-list, .list-item, [class*=result], tr', timeout=5)
+                    print_info("页面列表已加载")
+                except:
+                    print_warning("等待列表加载...")
+                    time.sleep(5)
+                
                 select_all_btn = page.ele('text:全选', timeout=3)
-                select_all_btn.click()
+                
+                # 先取消全选（如果有的话），再重新全选
+                try:
+                    select_all_btn.click()
+                except:
+                    select_all_btn.run_js('this.click()')
                 print_info("已点击'全选'")
-                time.sleep(1)
+                time.sleep(3)
+                
+                # 验证是否选中（检查复选框状态）
+                checked_count = 0
+                try:
+                    checked_boxes = page.eles('css:input[type=checkbox]:checked')
+                    checked_count = len(checked_boxes)
+                    print_info(f"已选中 {checked_count} 项")
+                except:
+                    pass
+                
+                # 如果选中项太少（1-3项），可能是全选没生效，重试
+                if checked_count <= 3:
+                    print_warning(f"选中项目较少({checked_count}项)，等待后重试全选...")
+                    time.sleep(3)
+                    try:
+                        # 重新点击全选按钮
+                        select_all_btn = page.ele('text:全选', timeout=3)
+                        try:
+                            select_all_btn.click()
+                        except:
+                            select_all_btn.run_js('this.click()')
+                        time.sleep(3)
+                        checked_boxes = page.eles('css:input[type=checkbox]:checked')
+                        checked_count = len(checked_boxes)
+                        print_info(f"重试后选中 {checked_count} 项")
+                    except Exception as retry_e:
+                        print_info(f"重试失败: {retry_e}")
+                
+                # 如果还是没选中，可能是当前页确实没有数据，跳过
+                if checked_count == 0:
+                    print_warning("当前页未选中任何项目，跳过...")
+                    return False
+                    
             except Exception as e:
                 print_error(f"点击'全选'失败: {e}")
                 return False
@@ -470,9 +661,8 @@ class PkulawCrawler:
             # 2. 点击下载图标
             print_info("点击下载图标...")
             try:
-                # 尝试多种下载按钮选择器
                 download_btn = None
-                for selector in ['.download-btn', 'text:下载', '[title*=下载]', '[class*=download]']:
+                for selector in ['.download-btn', 'text:下载', '[title*=下载]', '[class*=download]', '.icon-download']:
                     try:
                         download_btn = page.ele(selector, timeout=2)
                         if download_btn:
@@ -481,9 +671,12 @@ class PkulawCrawler:
                         continue
                 
                 if download_btn:
-                    download_btn.click()
+                    try:
+                        download_btn.click()
+                    except:
+                        download_btn.run_js('this.click()')
                     print_info("已点击下载按钮")
-                    time.sleep(2)
+                    time.sleep(3)
                 else:
                     print_error("未找到下载按钮")
                     return False
@@ -494,39 +687,230 @@ class PkulawCrawler:
             # 3. 在弹窗中选择"全文的纯文本"
             print_info("选择下载格式：全文的纯文本...")
             try:
-                # 等待弹窗出现
-                time.sleep(2)
+                time.sleep(3)  # 等待弹窗完全打开
                 
-                # 选择"全文"
+                # 检查弹窗是否打开
+                dialog = None
                 try:
-                    fulltext_option = page.ele('text:全文', timeout=3)
-                    fulltext_option.click()
-                    print_info("已选择'全文'")
-                    time.sleep(1)
+                    dialog = page.ele('.el-dialog', timeout=3)
+                    print_info("下载弹窗已打开")
                 except:
-                    pass
+                    print_warning("未检测到下载弹窗，继续尝试...")
                 
-                # 选择"纯文本"
-                try:
-                    text_option = page.ele('text:纯文本', timeout=3)
-                    text_option.click()
-                    print_info("已选择'纯文本'")
-                    time.sleep(1)
-                except:
-                    pass
+                # 选择"全文" - 带重试
+                for attempt in range(2):
+                    try:
+                        fulltext_option = page.ele('text:全文', timeout=3)
+                        fulltext_option.click()
+                        print_info("已选择'全文'")
+                        time.sleep(1)
+                        break
+                    except Exception as e:
+                        if attempt == 0:
+                            print_warning(f"选择'全文'失败，重试...")
+                            time.sleep(2)
+                        else:
+                            print_warning(f"选择'全文'失败: {e}")
+                
+                # 选择"纯文本" - 带重试
+                for attempt in range(2):
+                    try:
+                        text_option = page.ele('text:纯文本', timeout=3)
+                        text_option.click()
+                        print_info("已选择'纯文本'")
+                        time.sleep(1)
+                        break
+                    except Exception as e:
+                        if attempt == 0:
+                            print_warning(f"选择'纯文本'失败，重试...")
+                            time.sleep(2)
+                        else:
+                            print_warning(f"选择'纯文本'失败: {e}")
                 
             except Exception as e:
                 print_error(f"选择下载格式失败: {e}")
                 return False
             
-            # 4. 点击确定
-            print_info("点击确定...")
+            # 4. 点击确定，触发下载
+            print_info("点击弹窗中的确定...")
             try:
-                confirm_btn = page.ele('text:确定', timeout=3)
-                confirm_btn.click()
-                print_success(f"第 {page_num} 页下载任务已提交")
-                time.sleep(5)  # 等待下载开始
-                return True
+                # 记录点击前的URL
+                url_before = page.url
+                print_info(f"点击前URL: {url_before}")
+                
+                # 等待确保弹窗完全打开
+                time.sleep(2)
+                
+                # ========== DEBUG: 输出所有确定按钮信息 ==========
+                print_info("========== DEBUG: 查找确定按钮 ==========")
+                try:
+                    all_buttons = page.eles('text:确定')
+                    print_info(f"页面上共有 {len(all_buttons)} 个'确定'文本的元素")
+                    
+                    for i, btn in enumerate(all_buttons):
+                        try:
+                            tag = btn.tag or 'unknown'
+                            class_attr = btn.attr('class') or '无class'
+                            id_attr = btn.attr('id') or '无id'
+                            text = btn.text or '无文本'
+                            
+                            # 获取父元素信息
+                            parent = btn.parent()
+                            parent_tag = parent.tag if parent else '无父元素'
+                            parent_class = (parent.attr('class') or '无class') if parent else '无class'
+                            
+                            print(f"  [{i}] 标签:{tag}, 类:{class_attr[:40]}, 父标签:{parent_tag}, 父类:{parent_class[:40]}, 文本:{text[:20]}")
+                        except Exception as e:
+                            print(f"  [{i}] 获取信息失败: {e}")
+                except Exception as e:
+                    print_info(f"获取按钮列表失败: {e}")
+                
+                # 尝试获取弹窗HTML
+                print_info("DEBUG: 尝试获取弹窗HTML...")
+                try:
+                    dialog = page.ele('.el-dialog', timeout=2)
+                    if dialog:
+                        dialog_html = dialog.html[:500]
+                        print_info(f"弹窗HTML片段: {dialog_html}")
+                except Exception as e:
+                    print_info(f"获取弹窗HTML失败: {e}")
+                print_info("========== DEBUG END ==========")
+                # ========== DEBUG END ==========
+                
+                # 在弹窗中查找确定按钮
+                confirm_btn = None
+                
+                # 方法1: 优先查找class="submit"的确定按钮（弹窗中的确定按钮）
+                try:
+                    confirm_btn = page.ele('css:a.submit', timeout=3)
+                    if confirm_btn and '确定' in (confirm_btn.text or ''):
+                        print_info("找到class='submit'的确定按钮")
+                except:
+                    pass
+                
+                # 方法2: 查找弹窗容器，然后在其中找确定按钮
+                if not confirm_btn:
+                    try:
+                        dialog = page.ele('.el-dialog', timeout=3)
+                        if dialog:
+                            # 在弹窗footer中找确定按钮
+                            try:
+                                footer = dialog.ele('.el-dialog__footer', timeout=2)
+                                confirm_btn = footer.ele('text:确定', timeout=2)
+                                print_info("在弹窗footer中找到确定按钮")
+                            except:
+                                # 直接在弹窗中找
+                                confirm_btn = dialog.ele('text:确定', timeout=2)
+                                print_info("在弹窗中找到确定按钮")
+                    except:
+                        pass
+                
+                # 方法3: 用XPath查找弹窗footer中的确定按钮
+                if not confirm_btn:
+                    try:
+                        confirm_btn = page.ele('xpath://div[contains(@class,"el-dialog__footer")]//button[contains(.//span,"确定")]', timeout=3)
+                        if confirm_btn:
+                            print_info("使用XPath找到确定按钮")
+                    except Exception as e:
+                        print_info(f"XPath查找失败")
+                
+                # 方法4: 直接找所有确定按钮，取最后一个（备用方案）
+                if not confirm_btn:
+                    try:
+                        buttons = page.eles('text:确定')
+                        if buttons:
+                            confirm_btn = buttons[-1]  # 取最后一个
+                            print_info(f"使用最后一个确定按钮，共{len(buttons)}个")
+                    except:
+                        pass
+                
+                if not confirm_btn:
+                    print_error("未找到确定按钮")
+                    return False
+                
+                # 点击确定
+                click_success = False
+                try:
+                    confirm_btn.click()
+                    print_info("已点击确定")
+                    click_success = True
+                except Exception as e:
+                    print_info(f"点击失败: {e}，使用JS点击...")
+                    try:
+                        confirm_btn.run_js('this.click()')
+                        print_info("已使用JS点击确定")
+                        click_success = True
+                    except Exception as e2:
+                        print_error(f"JS点击也失败: {e2}")
+                
+                time.sleep(5)
+                
+                # 检查是否有新标签页打开
+                tabs = self.browser.get_tabs()
+                new_tab = None
+                for tab in tabs:
+                    if tab != self.pkulaw_page and tab.url != url_before:
+                        new_tab = tab
+                        break
+                
+                if new_tab:
+                    download_url = new_tab.url
+                    print_info(f"新标签页URL: {download_url}")
+                    
+                    if '.zip' in download_url.lower():
+                        print_info("检测到ZIP下载链接")
+                        # 切换到新标签页下载
+                        self.pkulaw_page = new_tab
+                        if self.download_and_extract_zip(download_url, page_num):
+                            print_success(f"第 {page_num} 页下载并解压完成")
+                            # 关闭下载标签页，回到原页面
+                            try:
+                                self.browser.get_tabs()[0].set.active()
+                            except:
+                                self.browser.get_tabs()[0]()
+                            self.pkulaw_page = self.browser.get_tabs()[0]
+                            # 关闭原页面的弹窗
+                            self.close_download_dialog()
+                            return True
+                        return False
+                    else:
+                        print_info(f"新页面: {download_url}")
+                        print_success(f"第 {page_num} 页下载已触发")
+                        # 切换回主标签页关闭弹窗
+                        for tab in self.browser.get_tabs():
+                            if 'law' in tab.url or 'case' in tab.url:
+                                try:
+                                    tab.set.active()
+                                except:
+                                    tab()
+                                self.pkulaw_page = tab
+                                break
+                        self.close_download_dialog()
+                        return True
+                else:
+                    # 检查当前URL是否变化
+                    url_after = page.url
+                    print_info(f"点击后URL: {url_after}")
+                    
+                    if url_after != url_before:
+                        if '.zip' in url_after.lower():
+                            print_info("页面变为ZIP下载")
+                            if self.download_and_extract_zip(url_after, page_num):
+                                print_success(f"第 {page_num} 页下载完成")
+                                return True
+                            return False
+                        else:
+                            print_success(f"第 {page_num} 页下载已触发")
+                            # 关闭弹窗
+                            self.close_download_dialog()
+                            return True
+                    else:
+                        print_warning("URL未变化，下载可能通过浏览器自动处理")
+                        print_success(f"第 {page_num} 页下载任务已提交")
+                        # 关闭弹窗
+                        self.close_download_dialog()
+                        return True
+                    
             except Exception as e:
                 print_error(f"点击确定失败: {e}")
                 return False
@@ -534,6 +918,39 @@ class PkulawCrawler:
         except Exception as e:
             print_error(f"下载第 {page_num} 页出错: {e}")
             return False
+    
+    def close_download_dialog(self):
+        """关闭下载弹窗（点击右上角×）"""
+        try:
+            print_info("关闭下载弹窗...")
+            # 尝试多种关闭按钮选择器
+            close_btn = None
+            for selector in ['.el-dialog__close', '.close-btn', 'text:×', 'text:关闭', '[class*=close]', '.icon-close']:
+                try:
+                    close_btn = self.pkulaw_page.ele(selector, timeout=2)
+                    if close_btn:
+                        print_info(f"找到关闭按钮: {selector}")
+                        break
+                except:
+                    continue
+            
+            if close_btn:
+                try:
+                    close_btn.click()
+                except:
+                    close_btn.run_js('this.click()')
+                print_info("已关闭弹窗")
+                time.sleep(1)
+            else:
+                # 尝试按ESC键关闭
+                try:
+                    self.pkulaw_page.run_js('document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape"}))')
+                    print_info("已按ESC关闭弹窗")
+                    time.sleep(1)
+                except:
+                    print_warning("未找到关闭按钮")
+        except Exception as e:
+            print_info(f"关闭弹窗出错: {e}")
     
     def go_to_next_page(self):
         """点击下一页"""
@@ -560,8 +977,19 @@ class PkulawCrawler:
                     next_btn.click()
                 except:
                     next_btn.run_js('this.click()')
-                print_info("已点击下一页")
-                time.sleep(3)
+                print_info("已点击下一页，等待页面加载...")
+                time.sleep(8)  # 增加等待时间，确保页面完全加载
+                
+                # 检查页面是否加载完成（通过检查全选按钮和列表是否存在）
+                try:
+                    page.ele('text:全选', timeout=5)
+                    # 额外检查列表是否加载
+                    page.ele('.result-list, .list-item, [class*=result], tr', timeout=5)
+                    print_info("新页面已加载，找到全选按钮和列表")
+                except:
+                    print_warning("新页面可能未完全加载，继续等待...")
+                    time.sleep(5)
+                
                 return True
             else:
                 print_info("无下一页按钮")
