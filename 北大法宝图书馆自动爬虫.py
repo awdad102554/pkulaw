@@ -8,7 +8,7 @@
     python 北大法宝图书馆自动爬虫.py
 """
 
-from DrissionPage import Chromium
+from DrissionPage import Chromium, ChromiumOptions
 import time
 import random
 import os
@@ -23,6 +23,7 @@ LIBRARY_URL = 'https://eds.tju.edu.cn/ermsClient/browse.do'
 LIBRARY_ACCOUNT = '017656'
 LIBRARY_PASSWORD = 'Lhy740220'
 CHROME_PORT = '127.0.0.1:9333'
+EDGE_PATH = r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
 
 # ============== 终端颜色 ==============
 class Colors:
@@ -73,7 +74,10 @@ class PkulawCrawler:
         """连接Chrome浏览器"""
         print_info("正在连接到Chrome浏览器...")
         try:
-            self.browser = Chromium(CHROME_PORT)
+            co = ChromiumOptions()
+            co.set_browser_path(EDGE_PATH)
+            co.set_local_port(9333)
+            self.browser = Chromium(co)
             self.page = self.browser.latest_tab
             print_success(f"已连接到浏览器: {self.page.title}")
             return True
