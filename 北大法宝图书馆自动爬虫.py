@@ -17,6 +17,9 @@ import re
 import zipfile
 import urllib.request
 import urllib.parse
+import shutil
+import ctypes
+from ctypes import wintypes
 
 # ============== 配置 ==============
 LIBRARY_URL = 'https://eds.tju.edu.cn/ermsClient/browse.do'
@@ -86,11 +89,167 @@ class PkulawCrawler:
             print_info("请先启动Chrome调试模式: chrome.exe --remote-debugging-port=9333")
             return False
     
+    def close_browser(self):
+        """关闭浏览器"""
+        if self.browser:
+            try:
+                print_info("正在关闭浏览器...")
+                self.browser.quit()
+                print_success("浏览器已关闭")
+            except Exception as e:
+                print_info(f"关闭浏览器时出错: {e}")
+            finally:
+                self.browser = None
+                self.page = None
+                self.pkulaw_page = None
+    
+    def extract_zip_gbk(self, zip_path, extract_to):
+        """解压ZIP文件，自动处理中文文件名编码（GBK）"""
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            for info in zip_ref.infolist():
+                raw_name = info.filename
+                # 尝试修复GBK编码导致的乱码
+                decoded_name = raw_name
+                try:
+                    decoded_name = raw_name.encode('cp437').decode('gbk')
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    try:
+                        decoded_name = raw_name.encode('utf-8').decode('gbk')
+                    except (UnicodeEncodeError, UnicodeDecodeError):
+                        pass
+                
+                # 替换非法字符
+                decoded_name = re.sub(r'[\\/:*?"<>|]', '_', decoded_name)
+                info.filename = decoded_name
+                zip_ref.extract(info, extract_to)
+        print_success(f"已解压到: {extract_to}")
+    
     def wait(self, min_sec=2, max_sec=5):
         """随机等待"""
         sec = random.randint(min_sec, max_sec)
         print_info(f"等待 {sec} 秒...")
         time.sleep(sec)
+    
+    def get_default_download_dir(self):
+        """获取浏览器默认下载目录，优先尝试Edge配置，其次默认Downloads"""
+        # 尝试从Edge Preferences读取真实下载路径
+        try:
+            pref_path = os.path.join(os.path.expanduser('~'), r'AppData\Local\Microsoft\Edge\User Data\Default\Preferences')
+            if os.path.exists(pref_path):
+                import json
+                with open(pref_path, 'r', encoding='utf-8') as f:
+                    prefs = json.load(f)
+                download_dir = prefs.get('download', {}).get('default_directory', '')
+                if download_dir:
+                    # 路径可能是JSON字符串里的转义形式，需要处理
+                    download_dir = download_dir.replace('\\\\', '\\')
+                    if os.path.exists(download_dir):
+                        return download_dir
+        except Exception as e:
+            print_info(f"读取Edge下载配置失败: {e}")
+        
+        # 默认Downloads
+        default_path = os.path.join(os.path.expanduser('~'), 'Downloads')
+        if os.path.exists(default_path):
+            return default_path
+        
+        # 最后尝试CSIDL
+        try:
+            csidl_downloads = 0x000d
+            buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+            ctypes.windll.shell32.SHGetFolderPathW(None, csidl_downloads, None, 0, buf)
+            if os.path.exists(buf.value):
+                return buf.value
+        except Exception:
+            pass
+        
+        return default_path
+    
+    def wait_and_move_browser_download(self, page_num, before_files=None, timeout=60):
+        """等待浏览器下载完成，将文件移动到 downloads 目录并解压（如果是 zip）"""
+        download_dir = self.get_default_download_dir()
+        if not os.path.exists(download_dir):
+            print_warning(f"下载目录不存在: {download_dir}")
+            return False
+        
+        if before_files is None:
+            before_files = set(os.listdir(download_dir))
+        
+        start_time = time.time()
+        last_size = {}
+        stable_count = 0
+        
+        while time.time() - start_time < timeout:
+            time.sleep(1)
+            try:
+                current_files = set(os.listdir(download_dir))
+                
+                # 1. 优先检测全新的非临时文件
+                new_files = current_files - before_files
+                candidates = [f for f in new_files if not f.endswith('.crdownload') and not f.endswith('.tmp')]
+                
+                if candidates:
+                    new_file = max(candidates, key=lambda f: os.path.getmtime(os.path.join(download_dir, f)))
+                    new_path = os.path.join(download_dir, new_file)
+                    
+                    # 等待文件大小稳定
+                    size = os.path.getsize(new_path)
+                    if last_size.get(new_file) == size and size > 0:
+                        stable_count += 1
+                        if stable_count >= 2:  # 连续2次大小不变认为下载完成
+                            target_path = os.path.join(self.folder_path, f'page_{page_num}_{new_file}')
+                            shutil.move(new_path, target_path)
+                            print_success(f"已移动下载文件到: {target_path}")
+                            
+                            if target_path.lower().endswith('.zip'):
+                                print_info("解压ZIP文件...")
+                                self.extract_zip_gbk(target_path, self.folder_path)
+                                os.remove(target_path)
+                                print_info("已删除ZIP文件")
+                            
+                            return True
+                    else:
+                        stable_count = 0
+                        last_size[new_file] = size
+                        continue
+                
+                # 2. 如果没有全新文件，检测最近修改的文件（文件名含"北大法宝"）
+                all_files = [f for f in current_files if os.path.isfile(os.path.join(download_dir, f))]
+                pkulaw_files = [f for f in all_files if '北大法宝' in f and not f.endswith('.crdownload') and not f.endswith('.tmp')]
+                
+                if pkulaw_files:
+                    latest_file = max(pkulaw_files, key=lambda f: os.path.getmtime(os.path.join(download_dir, f)))
+                    latest_mtime = os.path.getmtime(os.path.join(download_dir, latest_file))
+                    
+                    # 如果该文件是在点击确定后1分钟内修改的，认为是新下载
+                    if latest_mtime > start_time - 60:
+                        latest_path = os.path.join(download_dir, latest_file)
+                        size = os.path.getsize(latest_path)
+                        if last_size.get(latest_file) == size and size > 0:
+                            stable_count += 1
+                            if stable_count >= 2:
+                                target_path = os.path.join(self.folder_path, f'page_{page_num}_{latest_file}')
+                                shutil.move(latest_path, target_path)
+                                print_success(f"已移动下载文件到: {target_path}")
+                                
+                                if target_path.lower().endswith('.zip'):
+                                    print_info("解压ZIP文件...")
+                                    self.extract_zip_gbk(target_path, self.folder_path)
+                                    os.remove(target_path)
+                                    print_info("已删除ZIP文件")
+                                
+                                return True
+                        else:
+                            stable_count = 0
+                            last_size[latest_file] = size
+                            continue
+                
+            except Exception as e:
+                print_info(f"检测下载文件时出错: {e}")
+                continue
+        
+        print_warning(f"在 {timeout} 秒内未检测到浏览器下载文件")
+        return False
     
     def handle_login_popup(self):
         """处理登录弹窗"""
@@ -583,10 +742,7 @@ class PkulawCrawler:
             
             # 解压zip文件
             print_info("解压ZIP文件...")
-            with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
-                zip_ref.extractall(self.folder_path)
-            
-            print_info(f"已解压到: {self.folder_path}")
+            self.extract_zip_gbk(zip_filename, self.folder_path)
             
             # 删除zip文件
             os.remove(zip_filename)
@@ -742,6 +898,10 @@ class PkulawCrawler:
                 url_before = page.url
                 print_info(f"点击前URL: {url_before}")
                 
+                # 记录浏览器下载目录当前文件列表，用于检测自动下载
+                download_dir = self.get_default_download_dir()
+                before_files = set(os.listdir(download_dir)) if os.path.exists(download_dir) else set()
+                
                 # 等待确保弹窗完全打开
                 time.sleep(2)
                 
@@ -868,10 +1028,7 @@ class PkulawCrawler:
                         if self.download_and_extract_zip(download_url, page_num):
                             print_success(f"第 {page_num} 页下载并解压完成")
                             # 关闭下载标签页，回到原页面
-                            try:
-                                self.browser.get_tabs()[0].set.active()
-                            except:
-                                self.browser.get_tabs()[0]()
+                            self.browser.get_tabs()[0].set.activate()
                             self.pkulaw_page = self.browser.get_tabs()[0]
                             # 关闭原页面的弹窗
                             self.close_download_dialog()
@@ -883,14 +1040,11 @@ class PkulawCrawler:
                         # 切换回主标签页关闭弹窗
                         for tab in self.browser.get_tabs():
                             if 'law' in tab.url or 'case' in tab.url:
-                                try:
-                                    tab.set.active()
-                                except:
-                                    tab()
+                                tab.set.activate()
                                 self.pkulaw_page = tab
                                 break
                         self.close_download_dialog()
-                        return True
+                        # 继续检测浏览器下载目录
                 else:
                     # 检查当前URL是否变化
                     url_after = page.url
@@ -907,14 +1061,18 @@ class PkulawCrawler:
                             print_success(f"第 {page_num} 页下载已触发")
                             # 关闭弹窗
                             self.close_download_dialog()
-                            return True
+                            # 继续检测浏览器下载目录
                     else:
                         print_warning("URL未变化，下载可能通过浏览器自动处理")
                         print_success(f"第 {page_num} 页下载任务已提交")
                         # 关闭弹窗
                         self.close_download_dialog()
-                        return True
-                    
+                        # 继续检测浏览器下载目录
+                
+                # 兜底处理浏览器自动下载的文件
+                self.wait_and_move_browser_download(page_num, before_files)
+                return True
+                
             except Exception as e:
                 print_error(f"点击确定失败: {e}")
                 return False
@@ -1049,53 +1207,59 @@ class PkulawCrawler:
         print_header("北大法宝图书馆自动爬虫启动")
         
         start = time.time()
+        result = False
         
-        # 1. 连接浏览器
-        if not self.init_browser():
-            return False
-        
-        # 2. 登录图书馆
-        if not self.login_library():
-            print_error("登录失败，程序中止")
-            return False
-        
-        self.wait()
-        
-        # 3. 跳转北大法宝
-        if not self.goto_pkulaw():
-            print_error("跳转失败，程序中止")
-            return False
-        
-        self.wait()
-        
-        # 4. 搜索案件
-        if not self.search_cases(keyword, db_type):
-            print_error("搜索失败")
-            return False
-        
-        # 5. 批量下载
-        downloaded_pages = self.batch_download(max_pages)
-        
-        # 统计
-        elapsed = time.time() - start
-        print_header("运行统计")
-        print_info(f"运行时间: {elapsed:.1f} 秒")
-        print_info(f"数据库类型: {db_type}")
-        print_info(f"搜索关键词: {keyword if keyword else '无'}")
-        print_info(f"成功提交下载: {downloaded_pages} 页")
-        print_info(f"文件下载位置: 浏览器默认下载目录")
-        
-        return True
+        try:
+            # 1. 连接浏览器
+            if not self.init_browser():
+                return False
+            
+            # 2. 登录图书馆
+            if not self.login_library():
+                print_error("登录失败，程序中止")
+                return False
+            
+            self.wait()
+            
+            # 3. 跳转北大法宝
+            if not self.goto_pkulaw():
+                print_error("跳转失败，程序中止")
+                return False
+            
+            self.wait()
+            
+            # 4. 搜索案件
+            if not self.search_cases(keyword, db_type):
+                print_error("搜索失败")
+                return False
+            
+            # 5. 批量下载
+            downloaded_pages = self.batch_download(max_pages)
+            
+            # 统计
+            elapsed = time.time() - start
+            print_header("运行统计")
+            print_info(f"运行时间: {elapsed:.1f} 秒")
+            print_info(f"数据库类型: {db_type}")
+            print_info(f"搜索关键词: {keyword if keyword else '无'}")
+            print_info(f"成功提交下载: {downloaded_pages} 页")
+            print_info(f"文件下载位置: 浏览器默认下载目录")
+            
+            result = True
+            return result
+        finally:
+            self.close_browser()
 
 # ============== 主程序 ==============
 def main():
     print_header("北大法宝图书馆自动爬虫 - 天津大学版")
     
     print("使用说明:")
-    print("1. 先启动Chrome调试模式: chrome.exe --remote-debugging-port=9333")
-    print("2. 按提示输入搜索参数")
+    print("1. 程序会自动连接浏览器并执行下载")
+    print("2. 下载完成后会自动关闭浏览器")
+    print("3. 按提示输入搜索参数")
     print()
-    
+
     # 输入参数
     print("数据库类型:")
     print("  1. 法律法规 (默认)")
