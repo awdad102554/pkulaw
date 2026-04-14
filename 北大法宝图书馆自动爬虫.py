@@ -68,7 +68,11 @@ class PkulawCrawler:
         self.browser = None
         self.page = None
         self.pkulaw_page = None
-        
+        self.download_limit_reached = False
+        self._ensure_download_dir()
+    
+    def _ensure_download_dir(self):
+        """确保下载目录存在"""
         if not os.path.exists(self.folder_path):
             os.makedirs(self.folder_path)
             print_info(f"创建下载目录: {self.folder_path}")
@@ -723,6 +727,7 @@ class PkulawCrawler:
     
     def download_and_extract_zip(self, zip_url, page_num):
         """下载zip并解压"""
+        self._ensure_download_dir()
         try:
             # 下载zip文件
             zip_filename = os.path.join(self.folder_path, f'page_{page_num}.zip')
@@ -1009,6 +1014,10 @@ class PkulawCrawler:
                 
                 time.sleep(5)
                 
+                # 检测下载次数上限弹窗
+                if self.check_download_limit_popup():
+                    return False
+                
                 # 检查是否有新标签页打开
                 tabs = self.browser.get_tabs()
                 new_tab = None
@@ -1080,6 +1089,26 @@ class PkulawCrawler:
         except Exception as e:
             print_error(f"下载第 {page_num} 页出错: {e}")
             return False
+    
+    def check_download_limit_popup(self):
+        """检查是否因下载次数上限弹出限制窗口"""
+        try:
+            popup = self.pkulaw_page.ele('text:并发权限已用满', timeout=3)
+            if popup:
+                print_error("检测到下载次数已达上限：并发权限已用满")
+                # 尝试点击"继续浏览"关闭弹窗
+                try:
+                    continue_btn = self.pkulaw_page.ele('text:继续浏览', timeout=2)
+                    continue_btn.click()
+                    print_info("已点击'继续浏览'关闭弹窗")
+                    time.sleep(1)
+                except Exception as e:
+                    print_info(f"关闭权限弹窗失败: {e}")
+                self.download_limit_reached = True
+                return True
+        except:
+            pass
+        return False
     
     def close_download_dialog(self):
         """关闭下载弹窗（点击右上角×）"""
@@ -1185,6 +1214,11 @@ class PkulawCrawler:
                 # 下载当前页
                 if self.download_page(page_num):
                     success_count += 1
+                else:
+                    # 检测是否因为下载次数上限
+                    if getattr(self, 'download_limit_reached', False):
+                        print_error("下载次数已达上限，终止批量下载")
+                        break
                 
                 # 如果不是最后一页，点击下一页
                 if page_num < pages_to_download:
