@@ -72,10 +72,22 @@ class PkulawCrawler:
         self._ensure_download_dir()
     
     def _ensure_download_dir(self):
-        """确保下载目录存在"""
+        """确保下载目录存在，并在启动时清空其中所有内容"""
         if not os.path.exists(self.folder_path):
             os.makedirs(self.folder_path)
             print_info(f"创建下载目录: {self.folder_path}")
+        else:
+            print_info("清空下载目录...")
+            for entry in os.listdir(self.folder_path):
+                entry_path = os.path.join(self.folder_path, entry)
+                try:
+                    if os.path.isfile(entry_path):
+                        os.remove(entry_path)
+                    elif os.path.isdir(entry_path):
+                        shutil.rmtree(entry_path)
+                except Exception as e:
+                    print_warning(f"删除 {entry_path} 失败: {e}")
+            print_info("下载目录已清空")
     
     def init_browser(self):
         """连接Chrome浏览器"""
@@ -109,6 +121,9 @@ class PkulawCrawler:
     
     def extract_zip_gbk(self, zip_path, extract_to):
         """解压ZIP文件，自动处理中文文件名编码（GBK）"""
+        if not os.path.exists(extract_to):
+            os.makedirs(extract_to)
+            print_info(f"创建解压目录: {extract_to}")
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             for info in zip_ref.infolist():
                 raw_name = info.filename
@@ -182,13 +197,62 @@ class PkulawCrawler:
         start_time = time.time()
         last_size = {}
         stable_count = 0
+        tracked_crdownload = {}  # 追踪 .crdownload 临时文件
         
         while time.time() - start_time < timeout:
             time.sleep(1)
             try:
                 current_files = set(os.listdir(download_dir))
                 
-                # 1. 优先检测全新的非临时文件
+                # 1. 追踪当前存在的 .crdownload 文件
+                crdownloads = {f for f in current_files if f.endswith('.crdownload')}
+                for cr in crdownloads:
+                    cr_path = os.path.join(download_dir, cr)
+                    try:
+                        size = os.path.getsize(cr_path)
+                        tracked_crdownload[cr] = size
+                    except:
+                        pass
+                
+                # 2. 检查消失的 .crdownload -> 对应的最终文件（最高优先级，能准确识别本次下载）
+                disappeared_crs = set(tracked_crdownload.keys()) - crdownloads
+                for cr in list(disappeared_crs):
+                    final_name = cr[:-11]  # 去掉 .crdownload
+                    if not final_name:
+                        tracked_crdownload.pop(cr, None)
+                        continue
+                    
+                    final_path = os.path.join(download_dir, final_name)
+                    if final_name in current_files:
+                        try:
+                            mtime = os.path.getmtime(final_path)
+                        except:
+                            mtime = 0
+                        
+                        # 时间检查：必须是这次下载开始后生成的，避免误认上一页延迟完成的文件
+                        if final_name not in before_files or mtime >= start_time - 60:
+                            size = os.path.getsize(final_path)
+                            if size > 0 and last_size.get(final_name) == size:
+                                stable_count += 1
+                                if stable_count >= 2:
+                                    target_path = os.path.join(self.folder_path, f'page_{page_num}_{final_name}')
+                                    shutil.move(final_path, target_path)
+                                    print_success(f"已移动下载文件到: {target_path}")
+                                    if target_path.lower().endswith('.zip'):
+                                        print_info("解压ZIP文件...")
+                                        extract_dir = os.path.join(self.folder_path, f'page{page_num}')
+                                        self.extract_zip_gbk(target_path, extract_dir)
+                                        os.remove(target_path)
+                                        print_info("已删除ZIP文件")
+                                    return True
+                            else:
+                                last_size[final_name] = size
+                                stable_count = 0
+                                continue
+                    
+                    tracked_crdownload.pop(cr, None)
+                
+                # 3. 如果没有追踪到 crdownload 转换，检查全新非临时文件
                 new_files = current_files - before_files
                 candidates = [f for f in new_files if not f.endswith('.crdownload') and not f.endswith('.tmp')]
                 
@@ -196,28 +260,29 @@ class PkulawCrawler:
                     new_file = max(candidates, key=lambda f: os.path.getmtime(os.path.join(download_dir, f)))
                     new_path = os.path.join(download_dir, new_file)
                     
-                    # 等待文件大小稳定
-                    size = os.path.getsize(new_path)
-                    if last_size.get(new_file) == size and size > 0:
-                        stable_count += 1
-                        if stable_count >= 2:  # 连续2次大小不变认为下载完成
-                            target_path = os.path.join(self.folder_path, f'page_{page_num}_{new_file}')
-                            shutil.move(new_path, target_path)
-                            print_success(f"已移动下载文件到: {target_path}")
-                            
-                            if target_path.lower().endswith('.zip'):
-                                print_info("解压ZIP文件...")
-                                self.extract_zip_gbk(target_path, self.folder_path)
-                                os.remove(target_path)
-                                print_info("已删除ZIP文件")
-                            
-                            return True
-                    else:
-                        stable_count = 0
-                        last_size[new_file] = size
-                        continue
+                    # 时间校验：必须是下载开始后才出现的
+                    mtime = os.path.getmtime(new_path)
+                    if mtime >= start_time - 60:
+                        size = os.path.getsize(new_path)
+                        if last_size.get(new_file) == size and size > 0:
+                            stable_count += 1
+                            if stable_count >= 2:
+                                target_path = os.path.join(self.folder_path, f'page_{page_num}_{new_file}')
+                                shutil.move(new_path, target_path)
+                                print_success(f"已移动下载文件到: {target_path}")
+                                if target_path.lower().endswith('.zip'):
+                                    print_info("解压ZIP文件...")
+                                    extract_dir = os.path.join(self.folder_path, f'page{page_num}')
+                                    self.extract_zip_gbk(target_path, extract_dir)
+                                    os.remove(target_path)
+                                    print_info("已删除ZIP文件")
+                                return True
+                        else:
+                            stable_count = 0
+                            last_size[new_file] = size
+                            continue
                 
-                # 2. 如果没有全新文件，检测最近修改的文件（文件名含"北大法宝"）
+                # 4. 兜底：检测最近修改的北大法宝文件（时间必须在本次下载开始后）
                 all_files = [f for f in current_files if os.path.isfile(os.path.join(download_dir, f))]
                 pkulaw_files = [f for f in all_files if '北大法宝' in f and not f.endswith('.crdownload') and not f.endswith('.tmp')]
                 
@@ -225,8 +290,7 @@ class PkulawCrawler:
                     latest_file = max(pkulaw_files, key=lambda f: os.path.getmtime(os.path.join(download_dir, f)))
                     latest_mtime = os.path.getmtime(os.path.join(download_dir, latest_file))
                     
-                    # 如果该文件是在点击确定后1分钟内修改的，认为是新下载
-                    if latest_mtime > start_time - 60:
+                    if latest_mtime >= start_time - 60:
                         latest_path = os.path.join(download_dir, latest_file)
                         size = os.path.getsize(latest_path)
                         if last_size.get(latest_file) == size and size > 0:
@@ -235,13 +299,12 @@ class PkulawCrawler:
                                 target_path = os.path.join(self.folder_path, f'page_{page_num}_{latest_file}')
                                 shutil.move(latest_path, target_path)
                                 print_success(f"已移动下载文件到: {target_path}")
-                                
                                 if target_path.lower().endswith('.zip'):
                                     print_info("解压ZIP文件...")
-                                    self.extract_zip_gbk(target_path, self.folder_path)
+                                    extract_dir = os.path.join(self.folder_path, f'page{page_num}')
+                                    self.extract_zip_gbk(target_path, extract_dir)
                                     os.remove(target_path)
                                     print_info("已删除ZIP文件")
-                                
                                 return True
                         else:
                             stable_count = 0
@@ -254,6 +317,146 @@ class PkulawCrawler:
         
         print_warning(f"在 {timeout} 秒内未检测到浏览器下载文件")
         return False
+    
+    def select_download_format(self, page):
+        """在下载弹窗中选择格式：纯文本（全文是分组标题，无需点击）"""
+        print_info("选择下载格式：全文的纯文本...")
+        try:
+            time.sleep(3)  # 等待弹窗完全打开
+            
+            # 尝试获取弹窗HTML用于调试
+            try:
+                dialog_html = page.run_js('''
+                (function(){
+                    var dlg = document.querySelector('.el-dialog') || document.querySelector('.el-dialog__body') || document.querySelector('.download-dialog') || document.querySelector('[class*="dialog"]');
+                    return dlg ? dlg.outerHTML.slice(0, 3000) : 'NO_DIALOG_FOUND';
+                })()
+                ''')
+                if dialog_html and dialog_html != 'NO_DIALOG_FOUND':
+                    print_info(f"弹窗HTML片段: {dialog_html[:800]}")
+                else:
+                    print_warning("未通过常规class找到弹窗，尝试获取body最后一段HTML...")
+                    body_html = page.run_js('document.body.innerHTML.slice(-2000)')
+                    print_info(f"Body末尾HTML: {body_html}")
+            except Exception as e:
+                print_info(f"获取弹窗HTML失败: {e}")
+            
+            def click_text_by_js(target_text):
+                """使用 JS 在整个文档中查找完全匹配文本的元素并点击"""
+                js = f'''
+                (function(){{
+                    var all = document.querySelectorAll('*');
+                    for (var i=0; i<all.length; i++){{
+                        var el = all[i];
+                        var txt = el.textContent.trim();
+                        if (txt === "{target_text}" || txt === " {target_text}"){{
+                            // 如果它里面有 radio/checkbox，优先操作 input
+                            var inp = el.querySelector('input[type="radio"], input[type="checkbox"]');
+                            if (inp) {{
+                                inp.checked = true;
+                                var evt = document.createEvent("HTMLEvents");
+                                evt.initEvent("change", true, true);
+                                inp.dispatchEvent(evt);
+                                return true;
+                            }}
+                            el.click();
+                            return true;
+                        }}
+                    }}
+                    return false;
+                }})()
+                '''
+                try:
+                    ret = page.run_js(js)
+                    if ret:
+                        print_info(f"已使用JS选择'{target_text}'")
+                        time.sleep(1)
+                        return True
+                except Exception as e:
+                    print_info(f"JS点击'{target_text}'失败: {e}")
+                return False
+            
+            def click_text_by_dp(page_or_ele, target_text):
+                """使用 DrissionPage 查找包含文本的元素并用 JS 点击"""
+                selectors = [
+                    f'text:{target_text}',
+                    f'css:span:text({target_text})',
+                    f'css:div:text({target_text})',
+                    f'css:a:text({target_text})',
+                    f'css:label:text({target_text})',
+                    f'css:li:text({target_text})',
+                    f'xpath://span[text()="{target_text}"]',
+                    f'xpath://div[text()="{target_text}"]',
+                    f'xpath://a[text()="{target_text}"]',
+                    f'xpath://*[contains(text(),"{target_text}")]',
+                ]
+                for sel in selectors:
+                    try:
+                        ele = page_or_ele.ele(sel, timeout=1)
+                        if ele:
+                            ele.run_js('this.click()')
+                            print_info(f"已使用DP+JS选择'{target_text}'")
+                            time.sleep(1)
+                            return True
+                    except:
+                        continue
+                return False
+            
+            # "全文"通常是分组标题，不需要点击；只需要点击"纯文本"
+            clicked = False
+            if click_text_by_js('纯文本'):
+                clicked = True
+            elif click_text_by_dp(page, '纯文本'):
+                clicked = True
+            
+            if not clicked:
+                print_warning("未能成功选择'纯文本'，将使用默认格式继续")
+            
+            time.sleep(1)
+            return True
+            
+        except Exception as e:
+            print_error(f"选择下载格式失败: {e}")
+            return False
+    
+    def scan_and_move_leftover_downloads(self, start_time=None, page_num=None):
+        """扫描下载目录，将残留的北大法宝 ZIP 文件移动到项目目录并解压到对应page子目录"""
+        download_dir = self.get_default_download_dir()
+        if not os.path.exists(download_dir):
+            return
+        
+        try:
+            files = [f for f in os.listdir(download_dir) if os.path.isfile(os.path.join(download_dir, f))]
+            pkulaw_zips = [f for f in files if '北大法宝' in f and f.lower().endswith('.zip')]
+            
+            for f in pkulaw_zips:
+                src = os.path.join(download_dir, f)
+                if start_time:
+                    mtime = os.path.getmtime(src)
+                    if mtime < start_time:
+                        continue
+                
+                # 分配 page_num
+                assigned_page = page_num
+                if assigned_page is None:
+                    assigned_page = 1
+                    while os.path.exists(os.path.join(self.folder_path, f'page{assigned_page}')):
+                        assigned_page += 1
+                
+                target = os.path.join(self.folder_path, f)
+                if os.path.exists(target):
+                    base, ext = os.path.splitext(f)
+                    target = os.path.join(self.folder_path, f"{base}_{int(time.time())}{ext}")
+                
+                shutil.move(src, target)
+                print_success(f"扫描到残留文件并移动: {target}")
+                print_info("解压ZIP文件...")
+                extract_dir = os.path.join(self.folder_path, f'page{assigned_page}')
+                self.extract_zip_gbk(target, extract_dir)
+                os.remove(target)
+                print_info("已删除ZIP文件")
+        except Exception as e:
+            print_info(f"扫描残留文件时出错: {e}")
     
     def handle_login_popup(self):
         """处理登录弹窗"""
@@ -655,7 +858,7 @@ class PkulawCrawler:
                 # 按回车搜索
                 search_input.input('\n')
                 print_info("已按回车搜索")
-                time.sleep(5)
+                time.sleep(10)
                 print_info(f"搜索后页面: {page.title}")
             else:
                 print_warning("未找到搜索框")
@@ -726,7 +929,7 @@ class PkulawCrawler:
             return 100
     
     def download_and_extract_zip(self, zip_url, page_num):
-        """下载zip并解压"""
+        """下载zip并解压到page{page_num}子目录"""
         self._ensure_download_dir()
         try:
             # 下载zip文件
@@ -745,9 +948,10 @@ class PkulawCrawler:
             
             print_info(f"ZIP文件已下载: {zip_filename}")
             
-            # 解压zip文件
+            # 解压zip文件到page子目录
             print_info("解压ZIP文件...")
-            self.extract_zip_gbk(zip_filename, self.folder_path)
+            extract_dir = os.path.join(self.folder_path, f'page{page_num}')
+            self.extract_zip_gbk(zip_filename, extract_dir)
             
             # 删除zip文件
             os.remove(zip_filename)
@@ -850,51 +1054,9 @@ class PkulawCrawler:
                 return False
             
             # 3. 在弹窗中选择"全文的纯文本"
-            print_info("选择下载格式：全文的纯文本...")
-            try:
-                time.sleep(3)  # 等待弹窗完全打开
-                
-                # 检查弹窗是否打开
-                dialog = None
-                try:
-                    dialog = page.ele('.el-dialog', timeout=3)
-                    print_info("下载弹窗已打开")
-                except:
-                    print_warning("未检测到下载弹窗，继续尝试...")
-                
-                # 选择"全文" - 带重试
-                for attempt in range(2):
-                    try:
-                        fulltext_option = page.ele('text:全文', timeout=3)
-                        fulltext_option.click()
-                        print_info("已选择'全文'")
-                        time.sleep(1)
-                        break
-                    except Exception as e:
-                        if attempt == 0:
-                            print_warning(f"选择'全文'失败，重试...")
-                            time.sleep(2)
-                        else:
-                            print_warning(f"选择'全文'失败: {e}")
-                
-                # 选择"纯文本" - 带重试
-                for attempt in range(2):
-                    try:
-                        text_option = page.ele('text:纯文本', timeout=3)
-                        text_option.click()
-                        print_info("已选择'纯文本'")
-                        time.sleep(1)
-                        break
-                    except Exception as e:
-                        if attempt == 0:
-                            print_warning(f"选择'纯文本'失败，重试...")
-                            time.sleep(2)
-                        else:
-                            print_warning(f"选择'纯文本'失败: {e}")
-                
-            except Exception as e:
-                print_error(f"选择下载格式失败: {e}")
-                return False
+            if not self.select_download_format(page):
+                print_warning("下载格式选择可能未完全成功，继续尝试提交下载...")
+                # 不直接 return False，因为弹窗可能已经打开，只是选项选不中
             
             # 4. 点击确定，触发下载
             print_info("点击弹窗中的确定...")
@@ -1079,7 +1241,10 @@ class PkulawCrawler:
                         # 继续检测浏览器下载目录
                 
                 # 兜底处理浏览器自动下载的文件
-                self.wait_and_move_browser_download(page_num, before_files)
+                moved = self.wait_and_move_browser_download(page_num, before_files)
+                if not moved:
+                    print_warning("浏览器下载文件未能及时检测到，尝试扫描残留文件...")
+                    self.scan_and_move_leftover_downloads(start_time=time.time() - 120, page_num=page_num)
                 return True
                 
             except Exception as e:
@@ -1220,12 +1385,15 @@ class PkulawCrawler:
                         print_error("下载次数已达上限，终止批量下载")
                         break
                 
-                # 如果不是最后一页，点击下一页
+                # 如果不是最后一页，先扫描残留，再点击下一页
                 if page_num < pages_to_download:
+                    self.scan_and_move_leftover_downloads(page_num=page_num)
                     if not self.go_to_next_page():
                         print_warning("无法翻到下一页，结束下载")
                         break
             
+            # 全部结束后最终扫描
+            self.scan_and_move_leftover_downloads()
             print_success(f"批量下载完成: 成功提交 {success_count}/{pages_to_download} 页下载任务")
             print_info(f"文件将下载到浏览器默认下载目录")
             return success_count
