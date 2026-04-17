@@ -324,23 +324,6 @@ class PkulawCrawler:
         try:
             time.sleep(3)  # 等待弹窗完全打开
             
-            # 尝试获取弹窗HTML用于调试
-            try:
-                dialog_html = page.run_js('''
-                (function(){
-                    var dlg = document.querySelector('.el-dialog') || document.querySelector('.el-dialog__body') || document.querySelector('.download-dialog') || document.querySelector('[class*="dialog"]');
-                    return dlg ? dlg.outerHTML.slice(0, 3000) : 'NO_DIALOG_FOUND';
-                })()
-                ''')
-                if dialog_html and dialog_html != 'NO_DIALOG_FOUND':
-                    print_info(f"弹窗HTML片段: {dialog_html[:800]}")
-                else:
-                    print_warning("未通过常规class找到弹窗，尝试获取body最后一段HTML...")
-                    body_html = page.run_js('document.body.innerHTML.slice(-2000)')
-                    print_info(f"Body末尾HTML: {body_html}")
-            except Exception as e:
-                print_info(f"获取弹窗HTML失败: {e}")
-            
             def click_text_by_js(target_text):
                 """使用 JS 在整个文档中查找完全匹配文本的元素并点击"""
                 js = f'''
