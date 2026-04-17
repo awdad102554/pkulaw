@@ -869,47 +869,35 @@ class PkulawCrawler:
             print_info(f"点击'不分组'失败: {e}")
             return False
     
-    def get_total_pages(self):
-        """获取总页数"""
+    def get_current_page(self):
+        """通过列表第一个条目的序号获取当前页码"""
         try:
             page = self.pkulaw_page
             
-            # 尝试从分页信息获取总页数
-            # 格式如：页数 1/100
-            try:
-                page_info = page.ele('text:/\\d+/\\d+', timeout=2)
-                if page_info:
-                    text = page_info.text
-                    match = re.search(r'(\d+)/(\d+)', text)
-                    if match:
-                        current_page = int(match.group(1))
-                        total_pages = int(match.group(2))
-                        print_info(f"分页信息: 第{current_page}页/共{total_pages}页")
-                        return total_pages
-            except:
-                pass
-            
-            # 备用方法：找总页数文本
-            try:
-                total_text = page.ele('text:共.*篇', timeout=2)
-                if total_text:
-                    text = total_text.text
-                    match = re.search(r'共(\d+)', text)
-                    if match:
-                        total_count = int(match.group(1))
-                        # 假设每页20条
-                        total_pages = (total_count + 19) // 20
-                        print_info(f"总数量: {total_count}篇，估算总页数: {total_pages}页")
-                        return total_pages
-            except:
-                pass
-            
-            print_warning("无法获取总页数，使用默认值100")
-            return 100
-            
+            # 获取第一个条目标签 <label name="sortNum">
+            first_label = page.ele('css:label[name="sortNum"]', timeout=3)
+            if first_label:
+                text = first_label.text.strip()
+                match = re.search(r'(\d+)', text)
+                if match:
+                    sort_num = int(match.group(1))
+                    current_page = (sort_num - 1) // 20 + 1
+                    
+                    # 同时获取第一个条目标题
+                    try:
+                        first_title = page.ele('css:.t h4 a', timeout=2).text
+                    except:
+                        try:
+                            first_title = page.ele('css:input[name="recordList"]', timeout=2).attr('title')
+                        except:
+                            first_title = '未知'
+                    
+                    print_info(f"列表第一个示例: {first_title}")
+                    print_info(f"通过列表序号推断当前页码: 第{current_page}页 (序号{sort_num})")
+                    return current_page
         except Exception as e:
-            print_error(f"获取总页数出错: {e}")
-            return 100
+            print_info(f"通过列表序号获取页码失败: {e}")
+        return None
     
     def download_and_extract_zip(self, zip_url, page_num):
         """下载zip并解压到page{page_num}子目录"""
@@ -1347,20 +1335,23 @@ class PkulawCrawler:
             if not self.click_no_group():
                 print_warning("点击'不分组'失败，继续尝试下载...")
             
-            # 2. 获取总页数
-            total_pages = self.get_total_pages()
+            # 2. 确定要下载的页数
+            pages_to_download = max_pages
+            print_info(f"计划下载: {pages_to_download} 页")
             
-            # 3. 确定要下载的页数
-            pages_to_download = min(max_pages, total_pages)
-            print_info(f"计划下载: {pages_to_download} 页 (用户设置{max_pages}页, 实际共{total_pages}页)")
-            
-            # 4. 逐页下载
+            # 3. 逐页下载
             success_count = 0
-            for page_num in range(1, pages_to_download + 1):
-                print_info(f"\n处理第 {page_num}/{pages_to_download} 页...")
+            for i in range(pages_to_download):
+                # 通过页面元素获取当前真实页码
+                actual_page = self.get_current_page()
+                if actual_page is None:
+                    actual_page = i + 1
+                    print_warning(f"无法从页面获取页码，使用循环计数: 第{actual_page}页")
+                
+                print_info(f"\n处理第 {actual_page} 页...")
                 
                 # 下载当前页
-                if self.download_page(page_num):
+                if self.download_page(actual_page):
                     success_count += 1
                 else:
                     # 检测是否因为下载次数上限
@@ -1369,10 +1360,27 @@ class PkulawCrawler:
                         break
                 
                 # 如果不是最后一页，先扫描残留，再点击下一页
-                if page_num < pages_to_download:
-                    self.scan_and_move_leftover_downloads(page_num=page_num)
-                    if not self.go_to_next_page():
-                        print_warning("无法翻到下一页，结束下载")
+                if i < pages_to_download - 1:
+                    self.scan_and_move_leftover_downloads(page_num=actual_page)
+                    
+                    next_success = False
+                    for attempt in range(3):
+                        if not self.go_to_next_page():
+                            print_warning("无法翻到下一页，结束下载")
+                            break
+                        
+                        # 验证页码是否真正变化
+                        new_page = self.get_current_page()
+                        if new_page is not None and new_page > actual_page:
+                            next_success = True
+                            break
+                        elif new_page is not None and new_page == actual_page:
+                            print_warning(f"第 {attempt + 1} 次翻页后仍在第 {actual_page} 页，继续尝试...")
+                        else:
+                            print_warning(f"第 {attempt + 1} 次翻页后无法获取页码，继续尝试...")
+                    
+                    if not next_success:
+                        print_warning("多次尝试翻页失败，认为是最后一页，结束下载")
                         break
             
             # 全部结束后最终扫描
