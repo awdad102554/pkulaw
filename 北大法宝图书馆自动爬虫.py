@@ -494,18 +494,13 @@ class PkulawCrawler:
                     print_error("未找到登录按钮")
                     return False
                 
-                # 点击按钮（先尝试正常点击，失败则用JS）
+                # 使用JS点击，避免后台坐标偏移
                 try:
-                    continue_btn.click()
-                    print_info("已点击继续登录")
+                    continue_btn.run_js('this.click()')
+                    print_info("已使用JS点击继续登录")
                 except Exception as e:
-                    print_info(f"点击失败，使用JS点击: {e}")
-                    try:
-                        continue_btn.run_js('this.click()')
-                        print_info("已使用JS点击继续登录")
-                    except Exception as e2:
-                        print_error(f"JS点击也失败: {e2}")
-                        return False
+                    print_error(f"点击继续登录失败: {e}")
+                    return False
                 
                 time.sleep(3)
                 return True
@@ -564,18 +559,59 @@ class PkulawCrawler:
             # 点击登录
             print_info("点击登录按钮...")
             try:
-                login_btn.click()
-            except:
                 login_btn.run_js('this.click()')
+            except Exception as e:
+                print_info(f"点击登录按钮失败: {e}")
             
             time.sleep(3)
             print_info(f"点击后页面: {self.page.title}")
+            
+            # 判断是自动登录成功返回，还是需要填写账号密码
+            try:
+                logout_btn = self.page.ele('text:退出', timeout=2)
+                if logout_btn:
+                    print_success("检测到已自动登录成功，跳过填写账号密码")
+                    return True
+            except:
+                pass
+            
+            # 检查是否进入了登录页面（有账号输入框）
+            account_input = None
+            for selector in ['css:input[type=text]', 'tag:input@name=username', 'tag:input@name=account']:
+                try:
+                    account_input = self.page.ele(selector, timeout=1)
+                    if account_input:
+                        break
+                except:
+                    continue
+            
+            if not account_input:
+                print_warning("未检测到登录输入框，可能已自动登录或页面未加载完成")
+                # 再检查一次登录状态
+                try:
+                    logout_btn = self.page.ele('text:退出', timeout=2)
+                    if logout_btn:
+                        print_success("检测到已自动登录成功")
+                        return True
+                except:
+                    pass
+                # 如果既没输入框也没退出按钮，等待一下再检查
+                time.sleep(3)
+                try:
+                    logout_btn = self.page.ele('text:退出', timeout=2)
+                    if logout_btn:
+                        print_success("等待后检测到已自动登录成功")
+                        return True
+                except:
+                    pass
+                print_error("无法确定登录状态，既无输入框也无退出按钮")
+                return False
             
             # 填写账号密码
             print_info("填写登录信息...")
             
             # 学工号
-            account_input = None
+            account_input.clear()
             for selector in ['css:input[type=text]', 'tag:input@name=username', 'tag:input@name=account']:
                 try:
                     account_input = self.page.ele(selector, timeout=1)
@@ -611,7 +647,7 @@ class PkulawCrawler:
             print_info("提交登录...")
             try:
                 submit_btn = self.page.ele('.login-btn', timeout=2)
-                submit_btn.click()
+                submit_btn.run_js('this.click()')
             except:
                 try:
                     self.page.run_js('document.querySelector(".login-btn").click()')
@@ -732,9 +768,9 @@ class PkulawCrawler:
                     # 其他情况，直接点击
                     print_info("点击链接...")
                     try:
-                        pkulaw_link.click()
-                    except:
                         pkulaw_link.run_js('this.click()')
+                    except Exception as e:
+                        print_info(f"点击链接失败: {e}")
                     time.sleep(8)
             else:
                 print_info("未找到链接，尝试直接访问北大法宝...")
@@ -858,10 +894,9 @@ class PkulawCrawler:
         try:
             no_group_btn = self.pkulaw_page.ele('text:不分组', timeout=3)
             try:
-                no_group_btn.click()
-            except:
-                print_info("直接点击失败，使用JS点击...")
                 no_group_btn.run_js('this.click()')
+            except Exception as e:
+                print_info(f"点击'不分组'失败: {e}")
             print_info("已点击'不分组'，等待页面刷新...")
             time.sleep(3)
             return True
@@ -956,9 +991,9 @@ class PkulawCrawler:
                 
                 # 先取消全选（如果有的话），再重新全选
                 try:
-                    select_all_btn.click()
-                except:
                     select_all_btn.run_js('this.click()')
+                except Exception as e:
+                    print_info(f"点击'全选'失败: {e}")
                 print_info("已点击'全选'")
                 time.sleep(3)
                 
@@ -979,9 +1014,9 @@ class PkulawCrawler:
                         # 重新点击全选按钮
                         select_all_btn = page.ele('text:全选', timeout=3)
                         try:
-                            select_all_btn.click()
-                        except:
                             select_all_btn.run_js('this.click()')
+                        except Exception as e:
+                            print_info(f"重试点击'全选'失败: {e}")
                         time.sleep(3)
                         checked_boxes = page.eles('css:input[type=checkbox]:checked')
                         checked_count = len(checked_boxes)
@@ -1012,9 +1047,9 @@ class PkulawCrawler:
                 
                 if download_btn:
                     try:
-                        download_btn.click()
-                    except:
                         download_btn.run_js('this.click()')
+                    except Exception as e:
+                        print_info(f"点击下载按钮失败: {e}")
                     print_info("已点击下载按钮")
                     time.sleep(3)
                 else:
@@ -1133,17 +1168,11 @@ class PkulawCrawler:
                 # 点击确定
                 click_success = False
                 try:
-                    confirm_btn.click()
-                    print_info("已点击确定")
+                    confirm_btn.run_js('this.click()')
+                    print_info("已使用JS点击确定")
                     click_success = True
                 except Exception as e:
-                    print_info(f"点击失败: {e}，使用JS点击...")
-                    try:
-                        confirm_btn.run_js('this.click()')
-                        print_info("已使用JS点击确定")
-                        click_success = True
-                    except Exception as e2:
-                        print_error(f"JS点击也失败: {e2}")
+                    print_error(f"点击确定失败: {e}")
                 
                 time.sleep(5)
                 
@@ -1235,7 +1264,7 @@ class PkulawCrawler:
                 # 尝试点击"继续浏览"关闭弹窗
                 try:
                     continue_btn = self.pkulaw_page.ele('text:继续浏览', timeout=2)
-                    continue_btn.click()
+                    continue_btn.run_js('this.click()')
                     print_info("已点击'继续浏览'关闭弹窗")
                     time.sleep(1)
                 except Exception as e:
@@ -1263,9 +1292,9 @@ class PkulawCrawler:
             
             if close_btn:
                 try:
-                    close_btn.click()
-                except:
                     close_btn.run_js('this.click()')
+                except Exception as e:
+                    print_info(f"点击关闭按钮失败: {e}")
                 print_info("已关闭弹窗")
                 time.sleep(1)
             else:
@@ -1301,9 +1330,9 @@ class PkulawCrawler:
             
             if next_btn:
                 try:
-                    next_btn.click()
-                except:
                     next_btn.run_js('this.click()')
+                except Exception as e:
+                    print_info(f"点击下一页失败: {e}")
                 print_info("已点击下一页，等待页面加载...")
                 time.sleep(8)  # 增加等待时间，确保页面完全加载
                 
