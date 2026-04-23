@@ -341,6 +341,9 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
 
                         if (targetIdx !== -1){{
                             items[targetIdx].click();
+                            // 点击空白处关闭下拉框，避免遮挡后续操作
+                            var blankArea = document.querySelector('.el-main') || document.querySelector('.main-content') || document.querySelector('.fb-content') || document.body;
+                            if (blankArea) blankArea.click();
                             // 点击后验证 input 值是否正确
                             var chooseTypeSelect = gistItem.querySelector('.chooseType .el-select');
                             if (!chooseTypeSelect) chooseTypeSelect = gistItem.querySelector('.el-select.fb-mini');
@@ -655,36 +658,41 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
         keywords2 = ' '.join(keywords_list[3:6])
         print_info(f"设置全文关键词: {keywords_list}")
         try:
-            result = self.pkulaw_page.run_js(f'''
-                (function(){{
-                    var keywords1 = "{keywords1}";
-                    var keywords2 = "{keywords2}";
-                    var fullTextDiv = document.querySelector('[property="FullText"]');
-                    if (!fullTextDiv) return 'NOT_FOUND_FULLTEXT';
-                    var inputs = fullTextDiv.querySelectorAll('input[name="FullText"]');
-                    if (inputs.length < 1) return 'NOT_FOUND_INPUTS';
-                    if (inputs[0] && keywords1){{
-                        inputs[0].focus();
-                        inputs[0].value = keywords1;
-                        inputs[0].dispatchEvent(new Event('input', {{bubbles: true}}));
-                        inputs[0].dispatchEvent(new Event('change', {{bubbles: true}}));
-                    }}
-                    if (inputs[1] && keywords2){{
-                        inputs[1].focus();
-                        inputs[1].value = keywords2;
-                        inputs[1].dispatchEvent(new Event('input', {{bubbles: true}}));
-                        inputs[1].dispatchEvent(new Event('change', {{bubbles: true}}));
-                    }}
-                    return 'filled';
-                }})()
-            ''', as_expr=True)
-            if result and result.startswith('filled'):
-                print_info(f"全文已设置 (框1: '{keywords1}' 框2: '{keywords2}')")
-                time.sleep(0.5)
-                return True
-            else:
-                print_warning(f"全文设置可能未成功: {result}")
-                return False
+            max_wait = 10
+            for attempt in range(max_wait):
+                result = self.pkulaw_page.run_js(f'''
+                    (function(){{
+                        var keywords1 = "{keywords1}";
+                        var keywords2 = "{keywords2}";
+                        var fullTextDiv = document.querySelector('[property="FullText"]');
+                        if (!fullTextDiv) return 'NOT_FOUND_FULLTEXT';
+                        var inputs = fullTextDiv.querySelectorAll('input[name="FullText"]');
+                        if (inputs.length < 1) return 'NOT_FOUND_INPUTS';
+                        if (inputs[0] && keywords1){{
+                            inputs[0].focus();
+                            inputs[0].value = keywords1;
+                            inputs[0].dispatchEvent(new Event('input', {{bubbles: true}}));
+                            inputs[0].dispatchEvent(new Event('change', {{bubbles: true}}));
+                        }}
+                        if (inputs[1] && keywords2){{
+                            inputs[1].focus();
+                            inputs[1].value = keywords2;
+                            inputs[1].dispatchEvent(new Event('input', {{bubbles: true}}));
+                            inputs[1].dispatchEvent(new Event('change', {{bubbles: true}}));
+                        }}
+                        return 'filled';
+                    }})()
+                ''', as_expr=True)
+                if result and result.startswith('filled'):
+                    print_info(f"全文已设置 (框1: '{keywords1}' 框2: '{keywords2}')")
+                    time.sleep(0.5)
+                    return True
+                if attempt < max_wait - 1:
+                    print_warning(f"全文区域未加载，第{attempt+1}次重试...")
+                    time.sleep(1.5)
+                else:
+                    print_warning(f"全文设置可能未成功: {result}")
+            return False
         except Exception as e:
             print_error(f"设置全文失败: {{e}}")
             return False
