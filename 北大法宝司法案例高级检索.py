@@ -282,9 +282,9 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                     print_warning(f"展开下拉框失败: {r1}")
                     return False
 
-                time.sleep(0.6)
+                time.sleep(1.5)
 
-                # ========== 步骤2：选择下拉类型（带加载检测）==========
+                # ========== 步骤2：选择下拉类型（带加载检测+点击后验证）==========
                 r2 = self.pkulaw_page.run_js(f'''
                     (function(){{
                         var dropdownType = "{dropdown_type}";
@@ -322,11 +322,37 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                             optionTexts.push(items[i].textContent.trim());
                         }}
 
+                        // 优先精确匹配，其次包含匹配
+                        var targetIdx = -1;
                         for (var i=0; i<items.length; i++){{
                             if (items[i].textContent.trim() === dropdownType){{
-                                items[i].click();
+                                targetIdx = i;
+                                break;
+                            }}
+                        }}
+                        if (targetIdx === -1){{
+                            for (var i=0; i<items.length; i++){{
+                                if (items[i].textContent.trim().indexOf(dropdownType) !== -1){{
+                                    targetIdx = i;
+                                    break;
+                                }}
+                            }}
+                        }}
+
+                        if (targetIdx !== -1){{
+                            items[targetIdx].click();
+                            // 点击后验证 input 值是否正确
+                            var chooseTypeSelect = gistItem.querySelector('.chooseType .el-select');
+                            if (!chooseTypeSelect) chooseTypeSelect = gistItem.querySelector('.el-select.fb-mini');
+                            var actualVal = '';
+                            if (chooseTypeSelect){{
+                                var inp = chooseTypeSelect.querySelector('input.el-input__inner');
+                                if (inp) actualVal = inp.value || inp.placeholder || '';
+                            }}
+                            if (actualVal === dropdownType || actualVal.indexOf(dropdownType) !== -1){{
                                 return 'dropdown-selected:' + JSON.stringify(optionTexts);
                             }}
+                            return 'VERIFY_FAILED:' + actualVal + ':' + JSON.stringify(optionTexts);
                         }}
                         return 'OPTION_NOT_FOUND:' + JSON.stringify(optionTexts);
                     }})()
@@ -353,6 +379,15 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                         time.sleep(2)
                         continue
                     print_warning(f"未找到 '{dropdown_type}' 选项: {r2}")
+                    return False
+                if isinstance(r2, str) and r2.startswith('VERIFY_FAILED'):
+                    parts = r2.split(':')
+                    actual = parts[1] if len(parts) > 1 else 'unknown'
+                    if attempt < max_retry - 1:
+                        print_warning(f"点击后验证失败（实际值: {actual}，期望: {dropdown_type}），第{attempt+1}次重试...")
+                        time.sleep(2)
+                        continue
+                    print_warning(f"点击后验证失败: 实际值={actual}，期望={dropdown_type}")
                     return False
 
                 # ========== 步骤3：逐个填入关键词并选择 ==========
@@ -506,6 +541,154 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
             print_error(f"保存HTML失败: {e}")
             return False
 
+    def set_filter_input(self, title_text, value):
+        """通用：在指定标题的筛选区域（审理法院/审理程序等）填入文本并选择下拉选项"""
+        if not value:
+            return True
+        print_info(f"设置 {title_text}: {value}")
+        try:
+            # 填入值并触发过滤
+            r1 = self.pkulaw_page.run_js(f'''
+                (function(){{
+                    var titleText = "{title_text}";
+                    var value = "{value}";
+                    var titles = document.querySelectorAll('.fb-title');
+                    var item = null;
+                    for (var t=0; t<titles.length; t++){{
+                        if (titles[t].textContent.trim() === titleText){{
+                            var p = titles[t].parentElement;
+                            while (p && !p.classList.contains('item')) p = p.parentElement;
+                            item = p;
+                            break;
+                        }}
+                    }}
+                    if (!item) return 'NOT_FOUND_ITEM';
+                    var searchInputs = item.querySelectorAll('input');
+                    var targetInput = null;
+                    for (var i=0; i<searchInputs.length; i++){{
+                        var ph = searchInputs[i].getAttribute('placeholder') || '';
+                        if (ph.indexOf('最多5个词语') !== -1 || searchInputs[i].name === 'text'){{
+                            targetInput = searchInputs[i];
+                            break;
+                        }}
+                    }}
+                    if (!targetInput) return 'NOT_FOUND_INPUT';
+                    targetInput.focus();
+                    targetInput.click();
+                    targetInput.removeAttribute('readonly');
+                    targetInput.value = value;
+                    targetInput.dispatchEvent(new InputEvent('input', {{
+                        bubbles: true, inputType: 'insertText', data: value
+                    }}));
+                    targetInput.dispatchEvent(new Event('change', {{bubbles: true}}));
+                    var selectEl = targetInput.closest('.el-select');
+                    if (selectEl){{
+                        var vue = selectEl.__vue__;
+                        if (vue && typeof vue.handleQueryChange === 'function'){{
+                            vue.handleQueryChange(value);
+                        }}
+                    }}
+                    return 'filled';
+                }})()
+            ''', as_expr=True)
+            if not r1 or (isinstance(r1, str) and r1.startswith('NOT_FOUND')):
+                print_warning(f"{title_text} 填入失败: {r1}")
+                return False
+
+            # 等待下拉选项出现
+            time.sleep(1.5)
+
+            # 获取下拉选项内容
+            options = self.pkulaw_page.run_js('''
+                (function(){
+                    var allDropdowns = document.querySelectorAll('.el-select-dropdown.el-popper');
+                    var dropdown = null;
+                    for (var i=0; i<allDropdowns.length; i++){
+                        if (allDropdowns[i].style.display !== 'none'){
+                            dropdown = allDropdowns[i];
+                            break;
+                        }
+                    }
+                    if (!dropdown) return JSON.stringify({count: 0, items: []});
+                    var items = dropdown.querySelectorAll('.el-select-dropdown__item');
+                    var texts = [];
+                    for (var i=0; i<items.length; i++){
+                        texts.push(items[i].textContent.trim());
+                    }
+                    return JSON.stringify({count: items.length, items: texts});
+                })()
+            ''', as_expr=True)
+            print_info(f"下拉选项内容 [{title_text}]: {options}")
+
+            # 点击第一个选项
+            self.pkulaw_page.run_js('''
+                (function(){
+                    var allDropdowns = document.querySelectorAll('.el-select-dropdown.el-popper');
+                    var dropdown = null;
+                    for (var i=0; i<allDropdowns.length; i++){
+                        if (allDropdowns[i].style.display !== 'none'){
+                            dropdown = allDropdowns[i];
+                            break;
+                        }
+                    }
+                    if (dropdown){
+                        var items = dropdown.querySelectorAll('.el-select-dropdown__item');
+                        if (items.length > 0){
+                            items[0].click();
+                        }
+                    }
+                    var blankArea = document.querySelector('.el-main') || document.querySelector('.main-content') || document.querySelector('.fb-content') || document.body;
+                    if (blankArea) blankArea.click();
+                })()
+            ''', as_expr=True)
+            print_info(f"{title_text} 已设置")
+            return True
+        except Exception as e:
+            print_error(f"设置 {title_text} 失败: {e}")
+            return False
+
+    def set_full_text(self, keywords_list):
+        """设置全文检索关键词，前3个填入第一个框，后3个填入第二个框"""
+        if not keywords_list:
+            return True
+        keywords1 = ' '.join(keywords_list[:3])
+        keywords2 = ' '.join(keywords_list[3:6])
+        print_info(f"设置全文关键词: {keywords_list}")
+        try:
+            result = self.pkulaw_page.run_js(f'''
+                (function(){{
+                    var keywords1 = "{keywords1}";
+                    var keywords2 = "{keywords2}";
+                    var fullTextDiv = document.querySelector('[property="FullText"]');
+                    if (!fullTextDiv) return 'NOT_FOUND_FULLTEXT';
+                    var inputs = fullTextDiv.querySelectorAll('input[name="FullText"]');
+                    if (inputs.length < 1) return 'NOT_FOUND_INPUTS';
+                    if (inputs[0] && keywords1){{
+                        inputs[0].focus();
+                        inputs[0].value = keywords1;
+                        inputs[0].dispatchEvent(new Event('input', {{bubbles: true}}));
+                        inputs[0].dispatchEvent(new Event('change', {{bubbles: true}}));
+                    }}
+                    if (inputs[1] && keywords2){{
+                        inputs[1].focus();
+                        inputs[1].value = keywords2;
+                        inputs[1].dispatchEvent(new Event('input', {{bubbles: true}}));
+                        inputs[1].dispatchEvent(new Event('change', {{bubbles: true}}));
+                    }}
+                    return 'filled';
+                }})()
+            ''', as_expr=True)
+            if result and result.startswith('filled'):
+                print_info(f"全文已设置 (框1: '{keywords1}' 框2: '{keywords2}')")
+                time.sleep(0.5)
+                return True
+            else:
+                print_warning(f"全文设置可能未成功: {result}")
+                return False
+        except Exception as e:
+            print_error(f"设置全文失败: {{e}}")
+            return False
+
 
 def print_header(text):
     print(f"\n{'='*60}")
@@ -540,9 +723,25 @@ def main():
     case_choice = input("请选择 (1/2，默认1): ").strip()
     case_gist_text = "行政" if case_choice == "2" else "劳动争议、人事争议"
 
+    # 用户交互：输入全文关键词
+    print("\n请输入全文检索关键词（最多6个，空格分隔，直接回车表示不填）：")
+    full_text_input = input("关键词: ").strip()
+    full_text_keywords = full_text_input.split() if full_text_input else []
+
+    # 用户交互：输入审理法院
+    print("\n请输入审理法院（直接回车表示不填）：")
+    trial_court = input("审理法院: ").strip()
+
+    # 用户交互：输入审理程序
+    print("\n请输入审理程序（直接回车表示不填）：")
+    trial_step = input("审理程序: ").strip()
+
     print("\n" + "="*50)
     print(f"法院级别: {'中级' if court_mode == 'mid' else '高级'}")
     print(f"案由: {case_gist_text if case_gist_text else '无'}")
+    print(f"全文关键词: {' '.join(full_text_keywords) if full_text_keywords else '无'}")
+    print(f"审理法院: {trial_court if trial_court else '无'}")
+    print(f"审理程序: {trial_step if trial_step else '无'}")
     print("="*50)
     confirm = input("\n确认开始？(Y/n): ").strip().lower()
     if confirm and confirm not in ['y', 'yes', '是']:
@@ -565,7 +764,13 @@ def main():
         if not crawler.goto_advanced_case():
             return
 
-        # 先设置案由（此时 CaseGist 面板还显示案由输入框）
+        # 先设置全文关键词
+        if full_text_keywords:
+            if not crawler.set_full_text(full_text_keywords):
+                print_warning("全文设置可能未成功，继续执行...")
+            crawler.wait(0.5, 1)
+
+        # 再设置案由
         if case_gist_text:
             if not crawler.set_case_gist(case_gist_text):
                 print_warning("案由设置可能未成功，继续执行...")
@@ -577,15 +782,25 @@ def main():
             crawler.click_add_filter(f)
             crawler.wait(0.5, 1)
 
+        # 设置审理法院
+        if trial_court:
+            crawler.set_filter_input('审理法院', trial_court)
+            crawler.wait(0.5, 1)
+
+        # 设置审理程序
+        if trial_step:
+            crawler.set_filter_input('审理程序', trial_step)
+            crawler.wait(0.5, 1)
+
         # 设置法院级别
         if not crawler.set_court_level(court_mode):
             return
 
+        # 保存最终页面（点击检索前）
+        crawler.save_current_html('advanced_case_result.html')
+
         # 点击检索
         crawler.click_search()
-
-        # 保存最终页面
-        crawler.save_current_html('advanced_case_result.html')
         print_success("任务完成！")
 
     except KeyboardInterrupt:
