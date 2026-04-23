@@ -226,17 +226,24 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
         return False
 
     def set_case_gist(self, text, max_retry=3):
-        """设置案由：先选择下拉类型（民事/行政），再填入文本并回车，带重试"""
+        """设置案由：先选择下拉类型，再逐个填入关键词并选择匹配项"""
         dropdown_map = {
             '劳动争议、人事争议': '民事',
             '行政': '行政',
         }
         dropdown_type = dropdown_map.get(text, '全部')
-        print_info(f"设置案由: {text} (下拉: {dropdown_type})")
+        
+        # 确定关键词列表
+        if text == '行政':
+            keywords = ['行政主体', '行政行为']
+        else:
+            keywords = [text]
+        
+        print_info(f"设置案由: {text} (下拉: {dropdown_type}, 关键词: {keywords})")
 
         try:
             for attempt in range(max_retry):
-                # ========== 步骤1：找到案由区域并展开下拉框 ==========
+                # ========== 步骤1：展开下拉框 ==========
                 r1 = self.pkulaw_page.run_js(f'''
                     (function(){{
                         var titles = document.querySelectorAll('.fb-title');
@@ -269,21 +276,18 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                 ''', as_expr=True)
                 if not r1 or (isinstance(r1, str) and r1.startswith('NOT_FOUND')):
                     if attempt < max_retry - 1:
-                        print_warning(f"展开下拉框失败，第{{attempt+1}}次重试...")
+                        print_warning(f"展开下拉框失败，第{attempt+1}次重试...")
                         time.sleep(2)
                         continue
-                    print_warning(f"展开下拉框失败: {{r1}}")
+                    print_warning(f"展开下拉框失败: {r1}")
                     return False
 
-                # 等待下拉框选项渲染
                 time.sleep(0.6)
 
-                # ========== 步骤2：点击选项 + 填入输入框 ==========
+                # ========== 步骤2：选择下拉类型（带加载检测）==========
                 r2 = self.pkulaw_page.run_js(f'''
                     (function(){{
                         var dropdownType = "{dropdown_type}";
-                        var text = "{text}";
-
                         var titles = document.querySelectorAll('.fb-title');
                         var gistItem = null;
                         for (var t=0; t<titles.length; t++){{
@@ -300,7 +304,6 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                         }}
                         if (!gistItem) return 'NOT_FOUND_ITEM';
 
-                        // 1) 选择下拉选项（全局精确查找 + 兜底）
                         var dropdown = document.querySelector('.el-select-dropdown.chooseType-select');
                         if (!dropdown || dropdown.style.display === 'none'){{
                             var allDropdowns = document.querySelectorAll('.el-select-dropdown.el-popper');
@@ -311,100 +314,162 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                                 }}
                             }}
                         }}
-                        if (dropdown){{
-                            var items = dropdown.querySelectorAll('.el-select-dropdown__item');
-                            for (var i=0; i<items.length; i++){{
-                                if (items[i].textContent.trim() === dropdownType){{
-                                    items[i].click();
-                                    break;
-                                }}
-                            }}
+                        if (!dropdown) return 'DROPDOWN_NOT_RENDERED:0';
+
+                        var items = dropdown.querySelectorAll('.el-select-dropdown__item');
+                        var optionTexts = [];
+                        for (var i=0; i<items.length; i++){{
+                            optionTexts.push(items[i].textContent.trim());
                         }}
 
-                        // 2) 填入输入框
-                        var searchInputs = gistItem.querySelectorAll('input');
-                        var targetInput = null;
-                        for (var i=0; i<searchInputs.length; i++){{
-                            var ph = searchInputs[i].getAttribute('placeholder') || '';
-                            if (ph.indexOf('最多5个词语') !== -1 || searchInputs[i].name === 'text'){{
-                                targetInput = searchInputs[i];
-                                break;
+                        for (var i=0; i<items.length; i++){{
+                            if (items[i].textContent.trim() === dropdownType){{
+                                items[i].click();
+                                return 'dropdown-selected:' + JSON.stringify(optionTexts);
                             }}
                         }}
-                        if (!targetInput) return 'NOT_FOUND_INPUT';
-
-                        targetInput.focus();
-                        targetInput.click();
-                        targetInput.removeAttribute('readonly');
-                        targetInput.value = text;
-                        targetInput.dispatchEvent(new Event('input', {{bubbles: true}}));
-                        targetInput.dispatchEvent(new Event('change', {{bubbles: true}}));
-                        return 'wait-enter';
+                        return 'OPTION_NOT_FOUND:' + JSON.stringify(optionTexts);
                     }})()
                 ''', as_expr=True)
                 if not r2 or (isinstance(r2, str) and r2.startswith('NOT_FOUND')):
                     if attempt < max_retry - 1:
-                        print_warning(f"选择下拉或填输入框失败，第{{attempt+1}}次重试...")
+                        print_warning(f"选择下拉类型失败，第{attempt+1}次重试...")
                         time.sleep(2)
                         continue
-                    print_warning(f"选择下拉或填输入框失败: {{r2}}")
+                    print_warning(f"选择下拉类型失败: {r2}")
+                    return False
+                if isinstance(r2, str) and r2.startswith('DROPDOWN_NOT_RENDERED'):
+                    if attempt < max_retry - 1:
+                        print_warning(f"下拉框未渲染（网络延迟），第{attempt+1}次重试...")
+                        time.sleep(2)
+                        continue
+                    print_warning(f"下拉框未渲染: {r2}")
+                    return False
+                if isinstance(r2, str) and r2.startswith('OPTION_NOT_FOUND'):
+                    if attempt < max_retry - 1:
+                        parts = r2.split(':', 1)
+                        options = parts[1] if len(parts) > 1 else '[]'
+                        print_warning(f"未找到 '{dropdown_type}' 选项（当前选项: {options}），第{attempt+1}次重试...")
+                        time.sleep(2)
+                        continue
+                    print_warning(f"未找到 '{dropdown_type}' 选项: {r2}")
                     return False
 
-                # ========== 步骤3：等待后回车 ==========
-                if r2 == 'wait-enter':
-                    print_info("等待 1 秒后回车确认...")
-                    time.sleep(1)
-                    self.pkulaw_page.run_js('''
-                        (function(){
+                # ========== 步骤3：逐个填入关键词并选择 ==========
+                for kw in keywords:
+                    r3 = self.pkulaw_page.run_js(f'''
+                        (function(){{
+                            var kw = "{kw}";
                             var titles = document.querySelectorAll('.fb-title');
                             var gistItem = null;
-                            for (var t=0; t<titles.length; t++){
-                                if (titles[t].textContent.trim() === '案由'){
+                            for (var t=0; t<titles.length; t++){{
+                                if (titles[t].textContent.trim() === '案由'){{
                                     var p = titles[t].parentElement;
                                     while (p && !p.classList.contains('item')) p = p.parentElement;
                                     gistItem = p;
                                     break;
-                                }
-                            }
-                            if (!gistItem){
+                                }}
+                            }}
+                            if (!gistItem){{
                                 var gistDiv = document.querySelector('[property="CaseGist"]');
                                 if (gistDiv) gistItem = gistDiv.querySelector('.item');
-                            }
-                            if (!gistItem) return;
+                            }}
+                            if (!gistItem) return 'NOT_FOUND_ITEM';
 
                             var searchInputs = gistItem.querySelectorAll('input');
                             var targetInput = null;
-                            for (var i=0; i<searchInputs.length; i++){
+                            for (var i=0; i<searchInputs.length; i++){{
                                 var ph = searchInputs[i].getAttribute('placeholder') || '';
-                                if (ph.indexOf('最多5个词语') !== -1 || searchInputs[i].name === 'text'){
+                                if (ph.indexOf('最多5个词语') !== -1 || searchInputs[i].name === 'text'){{
                                     targetInput = searchInputs[i];
                                     break;
-                                }
-                            }
-                            if (targetInput){
-                                targetInput.removeAttribute('readonly');
-                                targetInput.focus();
-                                targetInput.click();
-                                targetInput.dispatchEvent(new KeyboardEvent('keydown', {
-                                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true
-                                }));
-                                targetInput.dispatchEvent(new KeyboardEvent('keypress', {
-                                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true
-                                }));
-                                targetInput.dispatchEvent(new KeyboardEvent('keyup', {
-                                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true
-                                }));
-                                targetInput.blur();
-                            }
-                        })()
+                                }}
+                            }}
+                            if (!targetInput) return 'NOT_FOUND_INPUT';
+
+                            targetInput.focus();
+                            targetInput.click();
+                            targetInput.removeAttribute('readonly');
+                            targetInput.value = kw;
+                            targetInput.dispatchEvent(new InputEvent('input', {{
+                                bubbles: true, inputType: 'insertText', data: kw
+                            }}));
+                            targetInput.dispatchEvent(new Event('change', {{bubbles: true}}));
+                            var selectEl = targetInput.closest('.el-select');
+                            if (selectEl){{
+                                var vue = selectEl.__vue__;
+                                if (vue && typeof vue.handleQueryChange === 'function'){{
+                                    vue.handleQueryChange(kw);
+                                }}
+                            }}
+                            return 'filled';
+                        }})()
                     ''', as_expr=True)
-                    print_info("案由已设置 (direct-input)")
-                else:
-                    print_info(f"案由已设置 ({{r2}})")
-                time.sleep(0.5)
+                    if not r3 or (isinstance(r3, str) and r3.startswith('NOT_FOUND')):
+                        print_warning(f"填入关键词失败: {kw} -> {r3}")
+                        continue
+
+                    if r3 == 'filled':
+                        wait_sec = 1.5
+                        print_info(f"等待 {wait_sec} 秒让下拉选项出现 [{kw}]...")
+                        time.sleep(wait_sec)
+                        # 获取下拉选项内容
+                        options = self.pkulaw_page.run_js('''
+                            (function(){
+                                var allDropdowns = document.querySelectorAll('.el-select-dropdown.el-popper');
+                                var dropdown = null;
+                                for (var i=0; i<allDropdowns.length; i++){
+                                    if (allDropdowns[i].style.display !== 'none'){
+                                        dropdown = allDropdowns[i];
+                                        break;
+                                    }
+                                }
+                                if (!dropdown) return JSON.stringify({count: 0, items: []});
+                                var items = dropdown.querySelectorAll('.el-select-dropdown__item');
+                                var texts = [];
+                                for (var i=0; i<items.length; i++){
+                                    texts.push(items[i].textContent.trim());
+                                }
+                                return JSON.stringify({count: items.length, items: texts});
+                            })()
+                        ''', as_expr=True)
+                        print_info(f"下拉选项内容 [{kw}]: {options}")
+                        # 点击精确匹配项
+                        self.pkulaw_page.run_js(f'''
+                            (function(){{
+                                var targetText = "{dropdown_type}/{kw}";
+                                var allDropdowns = document.querySelectorAll('.el-select-dropdown.el-popper');
+                                var dropdown = null;
+                                for (var i=0; i<allDropdowns.length; i++){{
+                                    if (allDropdowns[i].style.display !== 'none'){{
+                                        dropdown = allDropdowns[i];
+                                        break;
+                                    }}
+                                }}
+                                if (dropdown){{
+                                    var items = dropdown.querySelectorAll('.el-select-dropdown__item');
+                                    var found = false;
+                                    for (var i=0; i<items.length; i++){{
+                                        if (items[i].textContent.trim() === targetText){{
+                                            items[i].click();
+                                            found = true;
+                                            break;
+                                        }}
+                                    }}
+                                    if (!found && items.length > 0){{
+                                        items[0].click();
+                                    }}
+                                }}
+                                var blankArea = document.querySelector('.el-main') || document.querySelector('.main-content') || document.querySelector('.fb-content') || document.body;
+                                if (blankArea) blankArea.click();
+                            }})()
+                        ''', as_expr=True)
+                        print_info(f"已选择: {dropdown_type}/{kw}")
+                    time.sleep(0.5)
+                
                 return True
         except Exception as e:
-            print_error(f"设置案由失败: {{e}}")
+            print_error(f"设置案由失败: {e}")
             return False
 
     def click_search(self):
