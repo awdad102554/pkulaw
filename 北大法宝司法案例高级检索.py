@@ -25,6 +25,76 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
         print_info(f"等待 {sec:.1f} 秒...")
         time.sleep(sec)
 
+    def ensure_dropdown_closed(self, timeout=5):
+        """确保所有 el-select 下拉框已关闭，防止遮挡后续操作"""
+        start = time.time()
+        while time.time() - start < timeout:
+            # 检查是否还有打开的下拉框（使用 getComputedStyle 更可靠）
+            check = self.pkulaw_page.run_js('''
+                (function(){
+                    var dropdowns = document.querySelectorAll('.el-select-dropdown.el-popper');
+                    var openCount = 0;
+                    for (var i=0; i<dropdowns.length; i++){
+                        var style = window.getComputedStyle(dropdowns[i]);
+                        if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'){
+                            openCount++;
+                        }
+                    }
+                    return openCount;
+                })()
+            ''', as_expr=True)
+            if check == 0:
+                return True
+
+            # 方法1: 点击空白处
+            self.pkulaw_page.run_js('''
+                var blankArea = document.querySelector('.el-main') || document.querySelector('.main-content') || document.querySelector('.fb-content') || document.body;
+                if (blankArea) blankArea.click();
+            ''', as_expr=True)
+            time.sleep(0.5)
+
+            # 方法2: 按 Escape 键
+            self.pkulaw_page.run_js('''
+                document.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Escape', code: 'Escape', keyCode: 27,
+                    which: 27, bubbles: true, cancelable: true
+                }));
+            ''', as_expr=True)
+            time.sleep(0.5)
+
+            # 方法3: 找到当前打开着的 el-select 组件，通过 Vue 实例强制关闭
+            self.pkulaw_page.run_js('''
+                (function(){
+                    var selects = document.querySelectorAll('.el-select');
+                    for (var i=0; i<selects.length; i++){
+                        var vue = selects[i].__vue__;
+                        if (vue && vue.visible){
+                            vue.visible = false;
+                            if (typeof vue.handleClose === 'function') vue.handleClose();
+                        }
+                    }
+                })()
+            ''', as_expr=True)
+            time.sleep(0.5)
+
+        # 最终检查
+        final = self.pkulaw_page.run_js('''
+            (function(){
+                var dropdowns = document.querySelectorAll('.el-select-dropdown.el-popper');
+                for (var i=0; i<dropdowns.length; i++){
+                    var style = window.getComputedStyle(dropdowns[i]);
+                    if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'){
+                        return 'still_open';
+                    }
+                }
+                return 'closed';
+            })()
+        ''', as_expr=True)
+        if final == 'closed':
+            return True
+        print_warning("下拉框可能未完全关闭")
+        return False
+
     def goto_advanced_case(self):
         """进入司法案例高级检索页面"""
         print_step(3, "进入司法案例高级检索")
@@ -393,6 +463,9 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                     print_warning(f"点击后验证失败: 实际值={actual}，期望={dropdown_type}")
                     return False
 
+                # 确保案由大类下拉框已关闭
+                self.ensure_dropdown_closed()
+
                 # ========== 步骤3：逐个填入关键词并选择 ==========
                 for kw in keywords:
                     r3 = self.pkulaw_page.run_js(f'''
@@ -489,20 +562,23 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                                     var found = false;
                                     for (var i=0; i<items.length; i++){{
                                         if (items[i].textContent.trim() === targetText){{
-                                            items[i].click();
+                                            items[i].dispatchEvent(new MouseEvent('click', {{bubbles: true, cancelable: true, view: window}}));
                                             found = true;
                                             break;
                                         }}
                                     }}
                                     if (!found && items.length > 0){{
-                                        items[0].click();
+                                        items[0].dispatchEvent(new MouseEvent('click', {{bubbles: true, cancelable: true, view: window}}));
                                     }}
                                 }}
+                                // 等待Vue更新后再点击空白处关闭
                                 var blankArea = document.querySelector('.el-main') || document.querySelector('.main-content') || document.querySelector('.fb-content') || document.body;
                                 if (blankArea) blankArea.click();
                             }})()
                         ''', as_expr=True)
                         print_info(f"已选择: {dropdown_type}/{kw}")
+                    # 确保关键词下拉框已关闭
+                    self.ensure_dropdown_closed()
                     time.sleep(0.5)
                 
                 return True
@@ -637,13 +713,16 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                     if (dropdown){
                         var items = dropdown.querySelectorAll('.el-select-dropdown__item');
                         if (items.length > 0){
-                            items[0].click();
+                            items[0].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
                         }
                     }
+                    // 等待Vue更新后再点击空白处关闭
                     var blankArea = document.querySelector('.el-main') || document.querySelector('.main-content') || document.querySelector('.fb-content') || document.body;
                     if (blankArea) blankArea.click();
                 })()
             ''', as_expr=True)
+            # 确保下拉框已关闭
+            self.ensure_dropdown_closed()
             print_info(f"{title_text} 已设置")
             return True
         except Exception as e:
