@@ -586,6 +586,311 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
             print_error(f"设置案由失败: {e}")
             return False
 
+
+    def click_no_group(self):
+        """高级检索结果页：点击'不分组'dropdown选项"""
+        print_info("点击'不分组'...")
+        try:
+            # 1. 点击 dropdown trigger 展开菜单
+            self.pkulaw_page.run_js('''
+                (function(){
+                    var triggers = document.querySelectorAll('.dropdown .el-dropdown-link, .dropdown .el-dropdown-selfdefine');
+                    for (var i=0; i<triggers.length; i++){
+                        triggers[i].click();
+                    }
+                })()
+            ''', as_expr=True)
+            time.sleep(1)
+
+            # 2. 点击'不分组'选项
+            self.pkulaw_page.run_js('''
+                (function(){
+                    var items = document.querySelectorAll('.el-dropdown-menu__item');
+                    for (var i=0; i<items.length; i++){
+                        if (items[i].textContent.trim() === '不分组'){
+                            items[i].click();
+                            return 'clicked';
+                        }
+                    }
+                    return 'not_found';
+                })()
+            ''', as_expr=True)
+            time.sleep(3)
+            print_info("已选择'不分组'")
+            return True
+        except Exception as e:
+            print_warning(f"点击'不分组'失败: {e}")
+            return False
+
+    def download_page(self, page_num):
+        """高级检索结果页：下载当前页（重写父类，适配el-table结构）"""
+        try:
+            page = self.pkulaw_page
+            print_info(f"开始下载第 {page_num} 页...")
+
+            # 1. 等待表格加载
+            print_info("等待表格加载...")
+            try:
+                time.sleep(3)
+                page.ele('.el-table__body tr', timeout=10)
+                print_info("表格已加载")
+            except:
+                print_warning("等待表格加载超时，继续尝试...")
+                time.sleep(5)
+
+            # 2. 点击表头全选 checkbox
+            print_info("点击表头全选...")
+            try:
+                page.run_js('''
+                    (function(){
+                        var headerCheckbox = document.querySelector('th.el-table-column--selection .el-checkbox__inner');
+                        if (headerCheckbox){
+                            headerCheckbox.click();
+                            return 'clicked_header';
+                        }
+                        var headerInput = document.querySelector('th.el-table-column--selection input[type=checkbox]');
+                        if (headerInput){
+                            headerInput.click();
+                            return 'clicked_input';
+                        }
+                        return 'not_found';
+                    })()
+                ''', as_expr=True)
+                print_info("已点击表头全选")
+                time.sleep(2)
+
+                # 验证是否选中
+                checked_count = 0
+                try:
+                    checked_boxes = page.eles('css:.el-table__body tr .el-checkbox.is-checked')
+                    checked_count = len(checked_boxes)
+                    print_info(f"已选中 {checked_count} 行")
+                except:
+                    pass
+
+                if checked_count == 0:
+                    print_warning("未选中任何行，可能当前页无数据")
+                    return False
+            except Exception as e:
+                print_error(f"点击全选失败: {e}")
+                return False
+
+            # 3. 点击批量下载按钮
+            print_info("点击批量下载按钮...")
+            try:
+                download_clicked = page.run_js('''
+                    (function(){
+                        var btn = document.querySelector('.batch-container .left-downLoad');
+                        if (!btn) btn = document.querySelector('.batch-container .icon-qikan_xiazai');
+                        if (btn){
+                            btn.closest('p,div,span').click();
+                            return 'clicked';
+                        }
+                        return 'not_found';
+                    })()
+                ''', as_expr=True)
+                if download_clicked == 'not_found':
+                    print_warning("未找到批量下载按钮，尝试备用选择器...")
+                    for selector in ['.download-btn', 'text:下载', '[title*=下载]', '[class*=download]', '.icon-download']:
+                        try:
+                            btn = page.ele(selector, timeout=2)
+                            if btn:
+                                btn.run_js('this.click()')
+                                print_info(f"使用备用选择器点击下载: {selector}")
+                                break
+                        except:
+                            continue
+                else:
+                    print_info("已点击批量下载按钮")
+                time.sleep(3)
+            except Exception as e:
+                print_error(f"点击下载按钮失败: {e}")
+                return False
+
+            # 4. 选择下载格式（复用父类方法）
+            if not self.select_download_format(page):
+                print_warning("下载格式选择可能未完全成功，继续尝试提交下载...")
+
+            # 5. 点击确定，触发下载（复用父类逻辑）
+            print_info("点击弹窗中的确定...")
+            try:
+                url_before = page.url
+                download_dir = self.get_default_download_dir()
+                before_files = set(os.listdir(download_dir)) if os.path.exists(download_dir) else set()
+                time.sleep(2)
+
+                confirm_btn = None
+                # 方法1: .button_list 中的 primary 按钮（高级检索结果页下载弹窗）
+                try:
+                    confirm_btn = page.ele('css:.button_list .el-button--primary', timeout=3)
+                    if confirm_btn and '确定' in (confirm_btn.text or ''):
+                        print_info("在.button_list中找到确定按钮")
+                except:
+                    pass
+
+                # 方法2: class="submit"
+                if not confirm_btn:
+                    try:
+                        confirm_btn = page.ele('css:a.submit', timeout=3)
+                        if confirm_btn and '确定' in (confirm_btn.text or ''):
+                            print_info("找到class='submit'的确定按钮")
+                    except:
+                        pass
+
+                # 方法3: 弹窗footer中找
+                if not confirm_btn:
+                    try:
+                        dialog = page.ele('.el-dialog', timeout=3)
+                        if dialog:
+                            footer = dialog.ele('.el-dialog__footer', timeout=2)
+                            confirm_btn = footer.ele('text:确定', timeout=2)
+                            print_info("在弹窗footer中找到确定按钮")
+                    except:
+                        pass
+
+                # 方法4: XPath
+                if not confirm_btn:
+                    try:
+                        confirm_btn = page.ele('xpath://div[contains(@class,"el-dialog__footer")]//button[contains(.//span,"确定")]', timeout=3)
+                        if confirm_btn:
+                            print_info("使用XPath找到确定按钮")
+                    except:
+                        pass
+
+                # 方法5: 最后一个确定按钮
+                if not confirm_btn:
+                    try:
+                        buttons = page.eles('text:确定')
+                        if buttons:
+                            confirm_btn = buttons[-1]
+                            print_info(f"使用最后一个确定按钮，共{len(buttons)}个")
+                    except:
+                        pass
+
+                if not confirm_btn:
+                    print_error("未找到确定按钮")
+                    return False
+
+                try:
+                    confirm_btn.run_js('this.click()')
+                    print_info("已点击确定")
+                except Exception as e:
+                    print_error(f"点击确定失败: {e}")
+                    return False
+
+                time.sleep(5)
+
+                # 检测下载次数上限
+                if self.check_download_limit_popup():
+                    return False
+
+                # 检查新标签页
+                tabs = self.browser.get_tabs()
+                new_tab = None
+                for tab in tabs:
+                    if tab != self.pkulaw_page and tab.url != url_before:
+                        new_tab = tab
+                        break
+
+                if new_tab:
+                    download_url = new_tab.url
+                    print_info(f"新标签页URL: {download_url}")
+                    if '.zip' in download_url.lower():
+                        print_info("检测到ZIP下载链接")
+                        self.pkulaw_page = new_tab
+                        if self.download_and_extract_zip(download_url, page_num):
+                            print_success(f"第 {page_num} 页下载并解压完成")
+                            self.browser.get_tabs()[0].set.activate()
+                            self.pkulaw_page = self.browser.get_tabs()[0]
+                            self.close_download_dialog()
+                            return True
+                        return False
+                    else:
+                        print_success(f"第 {page_num} 页下载已触发")
+                        for tab in self.browser.get_tabs():
+                            if 'law' in tab.url or 'case' in tab.url:
+                                tab.set.activate()
+                                self.pkulaw_page = tab
+                                break
+                        self.close_download_dialog()
+                else:
+                    url_after = page.url
+                    print_info(f"点击后URL: {url_after}")
+                    if url_after != url_before:
+                        if '.zip' in url_after.lower():
+                            print_info("页面变为ZIP下载")
+                            if self.download_and_extract_zip(url_after, page_num):
+                                print_success(f"第 {page_num} 页下载完成")
+                                return True
+                            return False
+                        else:
+                            print_success(f"第 {page_num} 页下载已触发")
+                            self.close_download_dialog()
+                    else:
+                        print_warning("URL未变化，下载可能通过浏览器自动处理")
+                        print_success(f"第 {page_num} 页下载任务已提交")
+                        self.close_download_dialog()
+
+                # 兜底处理浏览器自动下载
+                moved = self.wait_and_move_browser_download(page_num, before_files)
+                if not moved:
+                    print_warning("浏览器下载文件未能及时检测到，尝试扫描残留文件...")
+                    self.scan_and_move_leftover_downloads(start_time=time.time() - 120, page_num=page_num)
+                return True
+
+            except Exception as e:
+                print_error(f"点击确定失败: {e}")
+                return False
+
+        except Exception as e:
+            print_error(f"下载第 {page_num} 页出错: {e}")
+            return False
+
+    def go_to_next_page(self):
+        """高级检索结果页：翻到下一页"""
+        try:
+            page = self.pkulaw_page
+            print_info("翻到下一页...")
+
+            # 点击下一页按钮
+            next_btn = None
+            for selector in ['.el-pagination .btn-next:not([disabled])', '.el-pagination .btn-next']:
+                try:
+                    next_btn = page.ele(selector, timeout=3)
+                    if next_btn:
+                        btn_disabled = next_btn.attr('disabled')
+                        if btn_disabled:
+                            next_btn = None
+                            continue
+                        break
+                except:
+                    continue
+
+            if next_btn:
+                try:
+                    next_btn.run_js('this.click()')
+                    print_info("已点击下一页")
+                except Exception as e:
+                    print_info(f"点击下一页失败: {e}")
+                    return False
+            else:
+                print_info("未找到下一页按钮，可能是最后一页")
+                return False
+
+            # 等待新页面加载
+            time.sleep(3)
+            try:
+                page.ele('.el-table__body tr', timeout=10)
+                print_info("新页面表格已加载")
+                return True
+            except:
+                print_warning("新页面加载超时")
+                return False
+
+        except Exception as e:
+            print_error(f"翻页失败: {e}")
+            return False
+
     def click_search(self):
         """点击检索按钮"""
         print_info("点击检索按钮...")
@@ -823,12 +1128,18 @@ def main():
     print("\n请输入审理程序（直接回车表示不填）：")
     trial_step = input("审理程序: ").strip()
 
+    # 用户交互：输入最大下载页数
+    print("\n请输入最大下载页数（默认5页，直接回车）：")
+    max_pages_input = input("下载页数: ").strip()
+    max_pages = int(max_pages_input) if max_pages_input.isdigit() else 5
+
     print("\n" + "="*50)
     print(f"法院级别: {'中级' if court_mode == 'mid' else '高级'}")
     print(f"案由: {case_gist_text if case_gist_text else '无'}")
     print(f"全文关键词: {' '.join(full_text_keywords) if full_text_keywords else '无'}")
     print(f"审理法院: {trial_court if trial_court else '无'}")
     print(f"审理程序: {trial_step if trial_step else '无'}")
+    print(f"最大下载页数: {max_pages}")
     print("="*50)
     confirm = input("\n确认开始？(Y/n): ").strip().lower()
     if confirm and confirm not in ['y', 'yes', '是']:
@@ -883,11 +1194,20 @@ def main():
         if not crawler.set_court_level(court_mode):
             return
 
-        # 保存最终页面（点击检索前）
-        crawler.save_current_html('advanced_case_result.html')
-
         # 点击检索
         crawler.click_search()
+
+        # 等待检索结果页面加载
+        print_info("等待检索结果页面加载...")
+        time.sleep(5)
+
+        # 保存检索结果页面（首页）
+        crawler.save_current_html('advanced_case_result.html')
+
+        # 批量下载：不分组 → 全选 → 下载 → 翻页
+        print_step(5, "开始批量下载")
+        crawler.batch_download(max_pages=max_pages)
+
         print_success("任务完成！")
 
     except KeyboardInterrupt:
