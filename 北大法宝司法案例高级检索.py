@@ -846,6 +846,69 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
             print_error(f"下载第 {page_num} 页出错: {e}")
             return False
 
+    def _parse_page_num(self):
+        """内部方法：从页面提取当前页和总页数，支持多种定位策略"""
+        page = self.pkulaw_page
+        # 策略1: DP精确选择器（优先分页容器内的pageNum）
+        selectors = [
+            '.paginationBox .pageNum',
+            '.pagination-container .pageNum',
+            '.pageNum'
+        ]
+        for sel in selectors:
+            try:
+                page_num_span = page.ele(f'css:{sel}', timeout=2)
+                if page_num_span:
+                    text = page_num_span.text.strip()
+                    match = re.search(r'页数\s*(\d+)\s*/\s*(\d+)', text)
+                    if match:
+                        return int(match.group(1)), int(match.group(2))
+            except:
+                continue
+
+        # 策略2: JS兜底，遍历所有.pageNum并取数字最大的total
+        result = page.run_js('''
+            (function(){
+                var spans = document.querySelectorAll('.pageNum');
+                var best = null;
+                for (var i=0; i<spans.length; i++){
+                    var text = spans[i].textContent.trim();
+                    var m = text.match(/页数\s*(\d+)\s*\/\s*(\d+)/);
+                    if (m){
+                        var cur = parseInt(m[1]), tot = parseInt(m[2]);
+                        if (!best || tot > best.total) best = {current: cur, total: tot};
+                    }
+                }
+                return best ? JSON.stringify(best) : null;
+            })()
+        ''', as_expr=True)
+        if result:
+            import json
+            data = json.loads(result)
+            return data['current'], data['total']
+        return None, None
+
+    def get_current_page(self):
+        """通过 <span class="pageNum"> 页数 1/100 </span> 获取当前页码"""
+        try:
+            current, total = self._parse_page_num()
+            if current is not None:
+                print_info(f"通过页码标签获取: 第{current}页 / 共{total}页")
+                return current
+        except Exception as e:
+            print_info(f"通过页码标签获取页码失败: {e}")
+        return None
+
+    def get_total_pages(self):
+        """通过 <span class="pageNum"> 获取总页数"""
+        try:
+            current, total = self._parse_page_num()
+            if total is not None:
+                return total
+        except Exception as e:
+            print_info(f"获取总页数失败: {e}")
+        return None
+
     def go_to_next_page(self):
         """高级检索结果页：翻到下一页"""
         try:
