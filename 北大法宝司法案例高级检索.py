@@ -658,19 +658,6 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                 ''', as_expr=True)
                 print_info("已点击表头全选")
                 time.sleep(2)
-
-                # 验证是否选中
-                checked_count = 0
-                try:
-                    checked_boxes = page.eles('css:.el-table__body tr .el-checkbox.is-checked')
-                    checked_count = len(checked_boxes)
-                    print_info(f"已选中 {checked_count} 行")
-                except:
-                    pass
-
-                if checked_count == 0:
-                    print_warning("未选中任何行，可能当前页无数据")
-                    return False
             except Exception as e:
                 print_error(f"点击全选失败: {e}")
                 return False
@@ -836,9 +823,6 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                 if not moved:
                     print_warning("浏览器下载文件未能及时检测到，尝试扫描残留文件...")
                     self.scan_and_move_leftover_downloads(start_time=time.time() - 120, page_num=page_num)
-                
-                # 保存当前页HTML（下载后、翻页前）
-                self.save_current_html(f'advanced_case_page_{page_num}.html')
                 
                 return True
 
@@ -1157,18 +1141,6 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
             print_error(f"点击检索失败: {e}")
             return False
 
-    def save_current_html(self, filename):
-        try:
-            html = self.pkulaw_page.html
-            filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(html)
-            print_success(f"页面HTML已保存: {filepath} ({len(html)} 字符)")
-            return True
-        except Exception as e:
-            print_error(f"保存HTML失败: {e}")
-            return False
-
     def set_filter_input(self, title_text, value):
         """通用：在指定标题的筛选区域（审理法院/审理程序等）填入文本并选择下拉选项"""
         if not value:
@@ -1335,16 +1307,6 @@ def print_header(text):
 def main():
     print_header("北大法宝司法案例高级检索")
 
-    # 清理旧HTML
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    for f in os.listdir(base_dir):
-        if f.startswith('advanced_case_') and f.endswith('.html'):
-            try:
-                os.remove(os.path.join(base_dir, f))
-                print_info(f"已删除旧文件: {f}")
-            except:
-                pass
-
     # 用户交互：选择法院级别
     print("\n请选择法院级别模式:")
     print("  1. 中级（最高人民法院 + 高级人民法院 + 中级人民法院）")
@@ -1445,12 +1407,18 @@ def main():
         print_info("等待检索结果页面加载...")
         time.sleep(5)
 
-        # 保存检索结果页面（首页）
-        crawler.save_current_html('advanced_case_result.html')
+        # 获取实际总页数，取 min(用户输入, 总页数)
+        total_pages = crawler.get_total_pages()
+        if total_pages:
+            actual_max_pages = min(max_pages, total_pages)
+            print_info(f"检索结果共 {total_pages} 页，计划下载 {actual_max_pages} 页")
+        else:
+            actual_max_pages = max_pages
+            print_info(f"计划下载 {actual_max_pages} 页")
 
         # 批量下载：不分组 → 全选 → 下载 → 翻页
         print_step(5, "开始批量下载")
-        crawler.batch_download(max_pages=max_pages)
+        crawler.batch_download(max_pages=actual_max_pages)
 
         print_success("任务完成！")
 
