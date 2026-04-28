@@ -915,27 +915,44 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
             page = self.pkulaw_page
             print_info("翻到下一页...")
 
-            # 点击下一页按钮
-            next_btn = None
-            for selector in ['.el-pagination .btn-next:not([disabled])', '.el-pagination .btn-next']:
-                try:
-                    next_btn = page.ele(selector, timeout=3)
-                    if next_btn:
-                        btn_disabled = next_btn.attr('disabled')
-                        if btn_disabled:
-                            next_btn = None
-                            continue
-                        break
-                except:
-                    continue
+            # 点击下一页按钮：通过JS精确定位分页组件内的btn-next
+            clicked = page.run_js('''
+                (function(){
+                    // 优先在分页容器内查找
+                    var containers = [
+                        '.pagination-container .el-pagination',
+                        '.paginationBox .el-pagination',
+                        '.el-pagination'
+                    ];
+                    for (var c=0; c<containers.length; c++){
+                        var pagination = document.querySelector(containers[c]);
+                        if (pagination){
+                            var btn = pagination.querySelector('.btn-next');
+                            if (btn && !btn.disabled){
+                                // 验证按钮内的文本包含"下一页"
+                                var span = btn.querySelector('span');
+                                if (span && span.textContent.trim() === '下一页'){
+                                    btn.click();
+                                    return 'clicked_in_container:' + containers[c];
+                                }
+                            }
+                        }
+                    }
+                    // 兜底：遍历所有.btn-next，找文本为"下一页"的
+                    var allBtns = document.querySelectorAll('.btn-next');
+                    for (var i=0; i<allBtns.length; i++){
+                        var span = allBtns[i].querySelector('span');
+                        if (span && span.textContent.trim() === '下一页' && !allBtns[i].disabled){
+                            allBtns[i].click();
+                            return 'clicked_by_text';
+                        }
+                    }
+                    return 'not_found';
+                })()
+            ''', as_expr=True)
 
-            if next_btn:
-                try:
-                    next_btn.run_js('this.click()')
-                    print_info("已点击下一页")
-                except Exception as e:
-                    print_info(f"点击下一页失败: {e}")
-                    return False
+            if clicked and str(clicked).startswith('clicked'):
+                print_info(f"已点击下一页 ({clicked})")
             else:
                 print_info("未找到下一页按钮，可能是最后一页")
                 return False
