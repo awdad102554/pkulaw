@@ -836,6 +836,10 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
                 if not moved:
                     print_warning("浏览器下载文件未能及时检测到，尝试扫描残留文件...")
                     self.scan_and_move_leftover_downloads(start_time=time.time() - 120, page_num=page_num)
+                
+                # 保存当前页HTML（下载后、翻页前）
+                self.save_current_html(f'advanced_case_page_{page_num}.html')
+                
                 return True
 
             except Exception as e:
@@ -866,12 +870,14 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
             except:
                 continue
 
-        # 策略2: JS兜底，遍历所有.pageNum并取数字最大的total
+        # 策略2: JS兜底，遍历所有.pageNum，跳过隐藏的，取数字最大的total
         result = page.run_js('''
             (function(){
                 var spans = document.querySelectorAll('.pageNum');
                 var best = null;
                 for (var i=0; i<spans.length; i++){
+                    var rect = spans[i].getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
                     var text = spans[i].textContent.trim();
                     var m = text.match(/页数\s*(\d+)\s*\/\s*(\d+)/);
                     if (m){
@@ -910,61 +916,219 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
         return None
 
     def go_to_next_page(self):
-        """高级检索结果页：翻到下一页"""
+        """高级检索结果页：翻到下一页，通过跳页输入框实现"""
         try:
             page = self.pkulaw_page
             print_info("翻到下一页...")
 
-            # 点击下一页按钮：通过JS精确定位分页组件内的btn-next
-            clicked = page.run_js('''
+            current_url = page.url
+            print_info(f"当前页面URL: {current_url}")
+            if 'downloads-hub' in current_url or current_url.startswith(('edge://', 'chrome://', 'browser://')) or current_url == 'about:blank':
+                print_warning(f"当前页面异常，尝试切回结果页...")
+                for tab in self.browser.get_tabs():
+                    if tab.url.startswith('http') and 'pfnl' in tab.url:
+                        tab.set.activate()
+                        self.pkulaw_page = tab
+                        page = tab
+                        print_info(f"已切回: {tab.url[:80]}")
+                        break
+            elif '/advanced/case/' in current_url and 'pfnl' not in current_url:
+                print_warning(f"当前页面不是结果页，尝试切回...")
+                for tab in self.browser.get_tabs():
+                    if tab.url.startswith('http') and 'pfnl' in tab.url:
+                        tab.set.activate()
+                        self.pkulaw_page = tab
+                        page = tab
+                        print_info(f"已切回结果页: {tab.url[:80]}")
+                        break
+
+            before_page = self.get_current_page()
+            if before_page:
+                print_info(f"翻页前: 第 {before_page} 页")
+                target_page = before_page + 1
+            else:
+                print_warning("无法获取当前页码，使用默认目标页 2")
+                target_page = 2
+
+            print_info("【诊断】检查分页区域交互状态...")
+            diagnose = page.run_js("""
                 (function(){
-                    // 优先在分页容器内查找
-                    var containers = [
-                        '.pagination-container .el-pagination',
-                        '.paginationBox .el-pagination',
-                        '.el-pagination'
-                    ];
-                    for (var c=0; c<containers.length; c++){
-                        var pagination = document.querySelector(containers[c]);
-                        if (pagination){
-                            var btn = pagination.querySelector('.btn-next');
-                            if (btn && !btn.disabled){
-                                // 验证按钮内的文本包含"下一页"
-                                var span = btn.querySelector('span');
-                                if (span && span.textContent.trim() === '下一页'){
-                                    btn.click();
-                                    return 'clicked_in_container:' + containers[c];
-                                }
+                    var results = [];
+                    var jumpBoxes = document.querySelectorAll('.jumpPage-box');
+                    var jumpBox = null;
+                    for (var i=0; i<jumpBoxes.length; i++){
+                        var r = jumpBoxes[i].getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) { jumpBox = jumpBoxes[i]; break; }
+                    }
+                    results.push('jumpBox_visible:' + (jumpBox ? 'yes' : 'no') + '/' + jumpBoxes.length);
+                    var input = jumpBox ? jumpBox.querySelector('input.el-input__inner') : null;
+                    var confirmBtn = jumpBox ? jumpBox.querySelector('.el-button--primary') : null;
+                    var nextBtns = document.querySelectorAll('.el-pagination .btn-next');
+                    var nextBtn = null;
+                    for (var i=0; i<nextBtns.length; i++){
+                        var r = nextBtns[i].getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) { nextBtn = nextBtns[i]; break; }
+                    }
+                    results.push('nextBtn_visible:' + (nextBtn ? 'yes' : 'no') + '/' + nextBtns.length);
+                    var pageNums = document.querySelectorAll('.pageNum');
+                    var pageNum = null;
+                    for (var i=0; i<pageNums.length; i++){
+                        var r = pageNums[i].getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) { pageNum = pageNums[i]; break; }
+                    }
+                    results.push('pageNum_visible:' + (pageNum ? pageNum.textContent.trim().replace(/\s+/g, ' ') : 'none') + '/' + pageNums.length);
+                    if (input) {
+                        var rect = input.getBoundingClientRect();
+                        results.push('input_rect:w=' + rect.width + ' h=' + rect.height);
+                    }
+                    if (confirmBtn) {
+                        var rect = confirmBtn.getBoundingClientRect();
+                        results.push('confirmBtn_rect:w=' + rect.width + ' h=' + rect.height);
+                    }
+                    if (nextBtn) {
+                        var rect = nextBtn.getBoundingClientRect();
+                        results.push('nextBtn_rect:w=' + rect.width + ' h=' + rect.height);
+                    }
+                    var masks = document.querySelectorAll('.el-loading-mask, .el-dialog__wrapper, .v-modal, .el-overlay');
+                    results.push('mask_count:' + masks.length);
+                    return results.join(' | ');
+                })()
+            """, as_expr=True)
+            print_info(f"【诊断结果】{diagnose}")
+
+            print_info("尝试清除遮罩层和残留弹窗...")
+            page.run_js("""
+                (function(){
+                    var dialogs = document.querySelectorAll('.el-dialog__wrapper, .el-overlay, .v-modal');
+                    for (var i=0; i<dialogs.length; i++){
+                        dialogs[i].style.display = 'none';
+                        dialogs[i].style.visibility = 'hidden';
+                        dialogs[i].style.opacity = '0';
+                    }
+                    var masks = document.querySelectorAll('.el-loading-mask');
+                    for (var i=0; i<masks.length; i++){
+                        masks[i].style.display = 'none';
+                    }
+                    document.body.classList.remove('el-popup-parent--hidden');
+                    document.documentElement.classList.remove('el-popup-parent--hidden');
+                })()
+            """, as_expr=True)
+            time.sleep(1)
+
+            page.run_js("""
+                var pagination = document.querySelector('.pagination-container') 
+                              || document.querySelector('.paginationBox')
+                              || document.querySelector('.el-pagination');
+                if (pagination) pagination.scrollIntoView({behavior: 'instant', block: 'end'});
+            """, as_expr=True)
+            time.sleep(1)
+
+            print_info(f"【策略1】尝试通过跳页框翻页到第 {target_page} 页...")
+            jump_result = page.run_js(f"""
+                (function(){{
+                    var target = {target_page};
+                    var jumpBoxes = document.querySelectorAll('.jumpPage-box');
+                    var jumpBox = null;
+                    for (var i=0; i<jumpBoxes.length; i++){{
+                        var r = jumpBoxes[i].getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {{ jumpBox = jumpBoxes[i]; break; }}
+                    }}
+                    if (!jumpBox) return 'jumpBox_not_visible';
+                    var input = jumpBox.querySelector('input.el-input__inner');
+                    if (!input) return 'input_not_found';
+                    input.scrollIntoView({{behavior: 'instant', block: 'center'}});
+                    input.focus();
+                    input.click();
+                    input.value = '';
+                    input.dispatchEvent(new Event('input', {{bubbles: true}}));
+                    var valStr = String(target);
+                    for (var i=0; i<valStr.length; i++){{
+                        var ch = valStr[i];
+                        input.value += ch;
+                        input.dispatchEvent(new InputEvent('input', {{
+                            bubbles: true, inputType: 'insertText', data: ch
+                        }}));
+                    }}
+                    input.dispatchEvent(new Event('change', {{bubbles: true}}));
+                    var actualVal = input.value;
+                    if (actualVal != target) return 'input_verify_failed:' + actualVal;
+                    input.dispatchEvent(new KeyboardEvent('keydown', {{
+                        key: 'Enter', code: 'Enter', keyCode: 13,
+                        which: 13, bubbles: true, cancelable: true
+                    }}));
+                    input.dispatchEvent(new KeyboardEvent('keyup', {{
+                        key: 'Enter', code: 'Enter', keyCode: 13,
+                        which: 13, bubbles: true, cancelable: true
+                    }}));
+                    var confirmBtn = jumpBox.querySelector('.el-button--primary');
+                    if (!confirmBtn) confirmBtn = jumpBox.querySelector('button');
+                    if (confirmBtn) {{
+                        confirmBtn.scrollIntoView({{behavior: 'instant', block: 'center'}});
+                        confirmBtn.click();
+                    }}
+                    return 'jump_ok:' + target + '|input_val:' + actualVal;
+                }})()
+            """, as_expr=True)
+            print_info(f"【策略1结果】{jump_result}")
+
+            if jump_result and str(jump_result).startswith('jump_ok'):
+                time.sleep(3)
+                for attempt in range(15):
+                    after_page = self.get_current_page()
+                    print_info(f"【翻页检查】期望第{target_page}页，实际第{after_page}页 (第{attempt+1}次)")
+                    if after_page:
+                        if after_page == target_page:
+                            print_info(f"翻页成功: 第 {after_page} 页")
+                            try:
+                                page.ele('.el-table__body tr', timeout=10)
+                                print_info("新页面表格已加载")
+                            except:
+                                print_warning("新页面表格加载超时")
+                            return True
+                        elif before_page and after_page == before_page:
+                            time.sleep(1)
+                            continue
+                        else:
+                            print_info(f"页码变化: 第 {after_page} 页")
+                            return True
+                    else:
+                        time.sleep(1)
+
+            print_warning("【策略2】跳页框未成功，尝试点击下一页按钮...")
+            clicked = page.run_js("""
+                (function(){
+                    var allNextBtns = document.querySelectorAll('.btn-next');
+                    var nextBtn = null;
+                    for (var i=0; i<allNextBtns.length; i++){
+                        var r = allNextBtns[i].getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            var span = allNextBtns[i].querySelector('span');
+                            if (span && span.textContent.trim() === '下一页' && !allNextBtns[i].disabled){
+                                nextBtn = allNextBtns[i];
+                                break;
                             }
                         }
                     }
-                    // 兜底：遍历所有.btn-next，找文本为"下一页"的
-                    var allBtns = document.querySelectorAll('.btn-next');
-                    for (var i=0; i<allBtns.length; i++){
-                        var span = allBtns[i].querySelector('span');
-                        if (span && span.textContent.trim() === '下一页' && !allBtns[i].disabled){
-                            allBtns[i].click();
-                            return 'clicked_by_text';
-                        }
-                    }
-                    return 'not_found';
+                    if (!nextBtn) return 'not_found';
+                    nextBtn.scrollIntoView({behavior: 'instant', block: 'center'});
+                    nextBtn.click();
+                    return 'clicked_visible';
                 })()
-            ''', as_expr=True)
+            """, as_expr=True)
+            print_info(f"【策略2结果】{clicked}")
 
             if clicked and str(clicked).startswith('clicked'):
                 print_info(f"已点击下一页 ({clicked})")
+                time.sleep(3)
+                try:
+                    page.ele('.el-table__body tr', timeout=10)
+                    print_info("新页面表格已加载")
+                    return True
+                except:
+                    print_warning("新页面加载超时")
+                    return False
             else:
                 print_info("未找到下一页按钮，可能是最后一页")
-                return False
-
-            # 等待新页面加载
-            time.sleep(3)
-            try:
-                page.ele('.el-table__body tr', timeout=10)
-                print_info("新页面表格已加载")
-                return True
-            except:
-                print_warning("新页面加载超时")
                 return False
 
         except Exception as e:
