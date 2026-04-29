@@ -835,26 +835,8 @@ class CaseAdvancedSearchCrawler(PkulawCrawler):
             return False
 
     def _parse_page_num(self):
-        """内部方法：从页面提取当前页和总页数，支持多种定位策略"""
+        """内部方法：从页面提取当前页和总页数，JS遍历所有.pageNum找有尺寸的"""
         page = self.pkulaw_page
-        # 策略1: DP精确选择器（优先分页容器内的pageNum）
-        selectors = [
-            '.paginationBox .pageNum',
-            '.pagination-container .pageNum',
-            '.pageNum'
-        ]
-        for sel in selectors:
-            try:
-                page_num_span = page.ele(f'css:{sel}', timeout=2)
-                if page_num_span:
-                    text = page_num_span.text.strip()
-                    match = re.search(r'页数\s*(\d+)\s*/\s*(\d+)', text)
-                    if match:
-                        return int(match.group(1)), int(match.group(2))
-            except:
-                continue
-
-        # 策略2: JS兜底，遍历所有.pageNum，跳过隐藏的，取数字最大的total
         result = page.run_js('''
             (function(){
                 var spans = document.querySelectorAll('.pageNum');
