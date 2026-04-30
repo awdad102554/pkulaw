@@ -149,40 +149,147 @@ class PkulawCrawler:
         print_info(f"等待 {sec} 秒...")
         time.sleep(sec)
     
-    def get_default_download_dir(self):
-        """获取浏览器默认下载目录，优先尝试Edge配置，其次默认Downloads"""
-        # 尝试从Edge Preferences读取真实下载路径
+    def _get_browser_user_data_dir(self):
+        """通过调试端口查找浏览器进程实际的 --user-data-dir"""
         try:
-            pref_path = os.path.join(os.path.expanduser('~'), r'AppData\Local\Microsoft\Edge\User Data\Default\Preferences')
-            if os.path.exists(pref_path):
-                import json
-                with open(pref_path, 'r', encoding='utf-8') as f:
+            import subprocess
+            import re
+            port = 9333
+            # 获取占用调试端口的进程 PID
+            cmd_pid = f'powershell -Command "Get-NetTCPConnection -LocalPort {port} | Select-Object -ExpandProperty OwningProcess"'
+            result = subprocess.run(cmd_pid, shell=True, capture_output=True, text=True, timeout=5)
+            pid = result.stdout.strip().split('\n')[0].strip()
+            if not pid or not pid.isdigit():
+                return None
+            # 获取进程命令行参数
+            cmd_cli = f'powershell -Command "Get-WmiObject Win32_Process -Filter \'ProcessId={pid}\' | Select-Object -ExpandProperty CommandLine"'
+            result = subprocess.run(cmd_cli, shell=True, capture_output=True, text=True, timeout=5)
+            cmdline = result.stdout.strip()
+            # 解析 --user-data-dir
+            match = re.search(r'--user-data-dir="([^"]+)"', cmdline)
+            if match:
+                return match.group(1)
+            match = re.search(r'--user-data-dir=([^ ]+)', cmdline)
+            if match:
+                return match.group(1)
+        except Exception as e:
+            print_info(f"获取浏览器进程信息失败: {e}")
+        return None
+
+    def get_default_download_dir(self):
+        """获取浏览器默认下载目录。
+        核心思路：读取当前实际控制的浏览器实例的 Preferences，
+        而不是去读桌面上另一个浏览器的配置。
+        """
+        import json
+
+        def _read_pref_download_dir(pref_path, label):
+            if not os.path.exists(pref_path):
+                return None
+            try:
+                with open(pref_path, 'r', encoding='utf-8-sig') as f:
                     prefs = json.load(f)
                 download_dir = prefs.get('download', {}).get('default_directory', '')
                 if download_dir:
-                    # 路径可能是JSON字符串里的转义形式，需要处理
                     download_dir = download_dir.replace('\\\\', '\\')
                     if os.path.exists(download_dir):
+                        print_info(f"从 {label} 读取到下载路径: {download_dir}")
                         return download_dir
-        except Exception as e:
-            print_info(f"读取Edge下载配置失败: {e}")
-        
-        # 默认Downloads
-        default_path = os.path.join(os.path.expanduser('~'), 'Downloads')
-        if os.path.exists(default_path):
-            return default_path
-        
-        # 最后尝试CSIDL
+            except Exception as e:
+                print_info(f"读取 {label} 配置失败: {e}")
+            return None
+
+        # 0. 判断当前浏览器类型
+        browser_type = 'unknown'
         try:
-            csidl_downloads = 0x000d
-            buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
-            ctypes.windll.shell32.SHGetFolderPathW(None, csidl_downloads, None, 0, buf)
-            if os.path.exists(buf.value):
-                return buf.value
+            if self.pkulaw_page:
+                ua = self.pkulaw_page.run_js('return navigator.userAgent;', as_expr=True)
+                if ua and 'Edg/' in ua:
+                    browser_type = 'edge'
+                elif ua and 'Chrome/' in ua:
+                    browser_type = 'chrome'
+                print_info(f"当前浏览器UA标识: {browser_type}")
         except Exception:
             pass
-        
-        return default_path
+
+        # 1. 优先读取【当前实际浏览器实例】的 Profile（通过进程命令行获取 --user-data-dir）
+        actual_profile_dir = self._get_browser_user_data_dir()
+        if actual_profile_dir:
+            print_info(f"当前浏览器实例的 user-data-dir: {actual_profile_dir}")
+            # 尝试该目录下的 Default/Preferences
+            actual_pref = os.path.join(actual_profile_dir, 'Default', 'Preferences')
+            result = _read_pref_download_dir(actual_pref, '浏览器实际运行Profile')
+            if result:
+                return result
+            # 也尝试 Profile 1/Profile 2 等
+            for profile_name in ['Profile 1', 'Profile 2', 'Profile 3']:
+                alt_pref = os.path.join(actual_profile_dir, profile_name, 'Preferences')
+                result = _read_pref_download_dir(alt_pref, f'浏览器实际运行Profile({profile_name})')
+                if result:
+                    return result
+            # 关键：已经定位到实际 Profile 但没读到自定义下载路径，
+            # 说明浏览器使用系统默认下载路径，不要再去读桌面上另一个浏览器的配置！
+            print_info("实际运行Profile未配置自定义下载路径，跳过其他Profile检测")
+        else:
+            # 2. 如果获取不到实际 Profile（浏览器没有 --user-data-dir），才按类型读默认路径
+            if browser_type == 'edge':
+                edge_pref = os.path.join(
+                    os.path.expanduser('~'),
+                    r'AppData\Local\Microsoft\Edge\User Data\Default\Preferences'
+                )
+                result = _read_pref_download_dir(edge_pref, 'Edge默认Profile')
+                if result:
+                    return result
+
+            if browser_type == 'chrome':
+                temp_base = os.path.join(os.environ.get('TEMP', ''), 'ChromeDebugProfile')
+                if os.path.isdir(temp_base):
+                    temp_profiles = ['Default']
+                    for d in os.listdir(temp_base):
+                        if os.path.isdir(os.path.join(temp_base, d)) and d not in temp_profiles:
+                            temp_profiles.append(d)
+                    for profile_name in temp_profiles:
+                        temp_prefs = os.path.join(temp_base, profile_name, 'Preferences')
+                        result = _read_pref_download_dir(temp_prefs, f'Chrome临时Profile({profile_name})')
+                        if result:
+                            return result
+                chrome_pref = os.path.join(
+                    os.path.expanduser('~'),
+                    r'AppData\Local\Google\Chrome\User Data\Default\Preferences'
+                )
+                result = _read_pref_download_dir(chrome_pref, 'Chrome默认Profile')
+                if result:
+                    return result
+
+        # 4. Windows API 获取系统真实 Downloads 文件夹
+        try:
+            class GUID(ctypes.Structure):
+                _fields_ = [
+                    ('Data1', wintypes.DWORD),
+                    ('Data2', wintypes.WORD),
+                    ('Data3', wintypes.WORD),
+                    ('Data4', wintypes.BYTE * 8)
+                ]
+            FOLDERID_Downloads = GUID(
+                0x374DE290, 0x123F, 0x4565,
+                (0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B)
+            )
+            ptr = ctypes.c_wchar_p()
+            hr = ctypes.windll.shell32.SHGetKnownFolderPath(
+                ctypes.byref(FOLDERID_Downloads), 0, None, ctypes.byref(ptr)
+            )
+            if hr == 0 and ptr.value:
+                path = ptr.value
+                ctypes.windll.ole32.CoTaskMemFree(ptr)
+                if os.path.exists(path):
+                    print_info(f"系统下载文件夹: {path}")
+                    return path
+        except Exception as e:
+            print_info(f"获取系统下载文件夹失败: {e}")
+
+        fallback = os.path.join(os.path.expanduser('~'), 'Downloads')
+        print_warning(f"无法精准定位浏览器下载路径，fallback: {fallback}")
+        return fallback
     
     def wait_and_move_browser_download(self, page_num, before_files=None, timeout=60):
         """等待浏览器下载完成，将文件移动到 downloads 目录并解压（如果是 zip）"""
