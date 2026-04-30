@@ -1412,14 +1412,13 @@ def main():
         traceback.print_exc()
     finally:
         print()
-        print_info("浏览器保持打开，请观察页面状态。")
-        print_info("观察完毕后，在此终端按 Ctrl+C 或关闭窗口即可。")
-        # 阻塞主线程，保持脚本运行，浏览器不关闭
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\n已结束")
+        # 任务结束或异常退出时，自动关闭浏览器（释放9333端口）
+        if crawler:
+            try:
+                crawler.close_browser()
+            except Exception as e:
+                print_info(f"关闭浏览器时出错: {e}")
+        print_info("程序已退出")
 
 
 if __name__ == '__main__':
